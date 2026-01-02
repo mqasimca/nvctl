@@ -1,208 +1,98 @@
-# Claude Code Rules for nvctl
+# nvctl - Claude Code Configuration
 
-## Project Overview
+> NVML-based GPU control tool for NVIDIA GPUs. Fan curves, power limits, thermal management.
 
-nvctl is an NVML-based GPU control tool written in Rust. It provides fan control, power management, and thermal monitoring for NVIDIA GPUs via a single binary CLI.
+## Quick Commands
 
----
-
-## CRITICAL: Forbidden Operations
-
-### Git - NEVER Execute These
-- `git push` - User pushes manually
-- `git commit` - User commits manually
-- `git push --force` - Destructive operation
-- `git rebase` - User manages history
-
-### Allowed Git (Read-Only)
 ```bash
-git status
-git diff
-git log
-git add --dry-run
+make check          # Run all checks (fmt, lint, test)
+make build          # Build release binary to bin/
+make ci-full        # Full CI: clean + checks + release
+make help           # Show all available targets
 ```
 
----
-
-## Code Writing Standards
-
-### Rule 1: Always Read Before Write
-**NEVER modify code without reading it first.** Before any edit:
-1. Read the target file completely
-2. Read related files (imports, tests)
-3. Understand existing patterns
-4. Then write code
-
-### Rule 2: Error Handling - No Panics
-```rust
-// CORRECT - Return Result
-pub fn get_temperature(&self) -> Result<Temperature, NvmlError> {
-    self.device.temperature(TemperatureSensor::Gpu)
-        .map(Temperature::new)
-        .map_err(NvmlError::from)
-}
-
-// WRONG - Never do this
-pub fn get_temperature(&self) -> Temperature {
-    Temperature::new(self.device.temperature(...).unwrap())  // NO!
-}
+### Individual Commands
+```bash
+make fmt            # Format code
+make lint           # Clippy (MUST pass)
+make test           # Run tests
+make clean          # Remove build artifacts
 ```
 
-### Rule 3: Newtype Validation
-All domain types validate on construction:
-```rust
-pub struct FanSpeed(u8);
+## Git Rules
 
-impl FanSpeed {
-    pub fn new(value: u8) -> Result<Self, DomainError> {
-        if value > 100 {
-            return Err(DomainError::InvalidFanSpeed(value));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_percentage(&self) -> u8 { self.0 }
-}
-
-impl TryFrom<u8> for FanSpeed {
-    type Error = DomainError;
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-```
-
-### Rule 4: Trait-Based Design
-```rust
-// Define trait for abstraction
-pub trait GpuDevice: Send + Sync {
-    fn temperature(&self) -> Result<Temperature, NvmlError>;
-    fn fan_speed(&self, fan: u32) -> Result<FanSpeed, NvmlError>;
-    fn set_fan_speed(&self, fan: u32, speed: FanSpeed) -> Result<(), NvmlError>;
-    fn power_limit(&self) -> Result<PowerLimit, NvmlError>;
-    fn set_power_limit(&self, limit: PowerLimit) -> Result<(), NvmlError>;
-}
-
-// Real implementation
-impl GpuDevice for NvmlDevice { /* ... */ }
-
-// Mock for testing
-#[cfg(test)]
-impl GpuDevice for MockDevice { /* ... */ }
-```
-
-### Rule 5: Error Types with thiserror
-```rust
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum AppError {
-    #[error("NVML error: {0}")]
-    Nvml(#[from] NvmlError),
-
-    #[error("Configuration error: {0}")]
-    Config(#[from] ConfigError),
-
-    #[error("No GPUs found")]
-    NoGpusFound,
-
-    #[error("GPU index {0} not found")]
-    GpuNotFound(u32),
-}
-```
+**FORBIDDEN:** `git push`, `git commit`, `git rebase`, `git push --force`
+**ALLOWED:** `git status`, `git diff`, `git log`, `git add --dry-run`
 
 ---
 
 ## Architecture
 
 ```
-Request Flow:
-CLI (clap) → Commands → Services → NVML Abstraction → Hardware
+CLI (clap) → Commands → Services → NVML → Hardware
 
-src/
-├── main.rs              # Entry point ONLY (no business logic)
-├── lib.rs               # Public API, module exports
-├── error.rs             # All error types
-├── cli/
-│   ├── mod.rs
-│   ├── args.rs          # Clap definitions
-│   └── output.rs        # Output formatting
-├── commands/
-│   ├── mod.rs
-│   ├── list.rs          # nvctl list
-│   ├── info.rs          # nvctl info
-│   ├── fan.rs           # nvctl fan
-│   ├── power.rs         # nvctl power
-│   └── control.rs       # nvctl control (daemon)
-├── domain/
-│   ├── mod.rs
-│   ├── fan.rs           # FanSpeed, FanPolicy
-│   ├── power.rs         # PowerLimit, PowerState
-│   ├── thermal.rs       # Temperature
-│   └── gpu.rs           # GpuInfo
-├── services/
-│   ├── mod.rs
-│   ├── fan_service.rs   # Fan control logic
-│   ├── power_service.rs # Power control logic
-│   └── monitor.rs       # Monitoring daemon
-├── nvml/
-│   ├── mod.rs
-│   ├── traits.rs        # GpuDevice trait
-│   ├── device.rs        # NvmlDevice impl
-│   └── wrapper.rs       # NVML initialization
-├── config/
-│   ├── mod.rs
-│   ├── file.rs          # Config file parsing
-│   └── builder.rs       # Config builder
-└── mock.rs              # Test mocks (#[cfg(test)])
+src/main.rs          # Entry point only
+src/error.rs         # Error types (AppError, NvmlError, DomainError)
+src/cli/args.rs      # CLI definitions
+src/cli/output.rs    # Output formatting
+src/commands/*.rs    # Command handlers
+src/domain/*.rs      # Validated types (FanSpeed, Temperature, PowerLimit)
+src/services/*.rs    # Business logic
+src/nvml/traits.rs   # GpuDevice trait
+src/nvml/device.rs   # Real NVML impl
+src/mock.rs          # Test mocks
 ```
 
 ---
 
-## Testing Requirements
+## Critical Rules
 
-### Every PR Must Have Tests
-
-#### Unit Tests - In Module
+### IMPORTANT: No Panics in Library Code
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+// CORRECT: Return Result
+fn get_temp(&self) -> Result<Temperature, NvmlError> { ... }
 
-    #[test]
-    fn fan_speed_validates_range() {
-        assert!(FanSpeed::new(0).is_ok());
-        assert!(FanSpeed::new(100).is_ok());
-        assert!(FanSpeed::new(101).is_err());
-    }
-
-    #[test]
-    fn fan_speed_boundary_conditions() {
-        // Test boundaries explicitly
-        let min = FanSpeed::new(0).unwrap();
-        let max = FanSpeed::new(100).unwrap();
-        assert_eq!(min.as_percentage(), 0);
-        assert_eq!(max.as_percentage(), 100);
-    }
-}
+// WRONG: Never unwrap
+fn get_temp(&self) -> Temperature { self.inner.temp().unwrap() }  // NO!
 ```
 
-#### Integration Tests - In tests/
-```rust
-// tests/cli_integration.rs
-use assert_cmd::Command;
+### IMPORTANT: Validate Domain Types on Construction
+See `src/domain/fan.rs:15` for `FanSpeed::new()` pattern.
 
-#[test]
-fn cli_shows_help() {
-    Command::cargo_bin("nvctl")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success();
-}
+### IMPORTANT: Use Trait Abstraction
+See `src/nvml/traits.rs:12` for `GpuDevice` trait. Mock via `src/mock.rs`.
+
+---
+
+## Code Patterns
+
+### Error Propagation
+```rust
+let device = get_device()?;
+let temp = device.temperature()?;
 ```
 
-#### Mock Testing Pattern
+### Error Mapping
+```rust
+let result = nvml_call().map_err(NvmlError::from)?;
+```
+
+### Option to Result
+```rust
+devices.get(idx).ok_or(AppError::GpuNotFound(idx))?
+```
+
+### Derives
+- Value types: `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`
+- Data: `#[derive(Debug, Clone, Serialize, Deserialize)]`
+- Errors: `#[derive(Error, Debug)]`
+
+---
+
+## Testing
+
+Every change needs tests. Pattern for mocks:
+
 ```rust
 #[cfg(test)]
 mod tests {
@@ -210,162 +100,87 @@ mod tests {
     use crate::mock::MockDevice;
 
     #[test]
-    fn service_handles_device_error() {
-        let mock = MockDevice::new()
-            .with_temperature_error(NvmlError::Unknown);
-
-        let service = FanService::new(Box::new(mock));
-        let result = service.get_status();
-
-        assert!(matches!(result, Err(AppError::Nvml(_))));
+    fn test_with_mock() {
+        let mock = MockDevice::new().with_temperature(Temperature::new(65));
+        // test logic
     }
 }
 ```
 
-### Test Checklist
-- [ ] Unit tests for all domain types
-- [ ] Boundary value tests (0, max, overflow)
-- [ ] Error case tests
-- [ ] Mock-based service tests
-- [ ] CLI argument parsing tests
+Test categories: unit tests in-module, boundary tests (0, max, overflow), error cases, CLI parsing.
 
 ---
 
-## Quality Gates
+## Workflow: Adding Features
 
-### Before Marking Work Complete
-Run these commands and fix all issues:
+1. Define CLI args in `src/cli/args.rs`
+2. Create command in `src/commands/`
+3. Add domain types in `src/domain/` (if needed)
+4. Add service in `src/services/` (if needed)
+5. Write tests at each layer
+6. Run quality gates: `make check`
 
-```bash
-# Format code
-cargo fmt
+## Workflow: Fixing Bugs
 
-# Lint check - fix ALL warnings
-cargo clippy -- -D warnings
-
-# Run all tests
-cargo test
-
-# Check docs compile
-cargo doc --no-deps
-```
-
-### Code Quality Checklist
-- [ ] No `.unwrap()` or `.expect()` in library code
-- [ ] All public items documented with `///`
-- [ ] Tests for new functionality
-- [ ] Error types properly defined
-- [ ] Domain types validate input
-
----
-
-## Dependencies
-
-```toml
-[dependencies]
-nvml-wrapper = "0.11"
-clap = { version = "4", features = ["derive", "env"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "0.8"
-thiserror = "2"
-log = "0.4"
-env_logger = "0.11"
-
-[dev-dependencies]
-tempfile = "3"
-```
-
----
-
-## Agent Workflows
-
-### When Adding a New Command
-1. Define args in `src/cli/args.rs`
-2. Create handler in `src/commands/new_cmd.rs`
-3. Add service logic in `src/services/`
-4. Add domain types if needed in `src/domain/`
-5. Export from `mod.rs` files
-6. Add tests at each layer
-7. Run quality gates
-
-### When Fixing a Bug
-1. Write a failing test that reproduces the bug
+1. Write failing test that reproduces bug
 2. Fix the code
 3. Verify test passes
 4. Run full test suite
-5. Run quality gates
-
-### When Refactoring
-1. Ensure tests exist for current behavior
-2. Make incremental changes
-3. Run tests after each change
-4. Keep commits atomic
 
 ---
 
-## Logging Conventions
+## Agent Configuration
+
+### Proactive Agents (use automatically)
+| Agent | Trigger |
+|-------|---------|
+| `code-reviewer` | After writing significant code |
+| `code-simplifier` | After complex implementations |
+| `silent-failure-hunter` | After adding error handling |
+| `pr-test-analyzer` | Before PR creation |
+| `type-design-analyzer` | When adding new types |
+
+### On-Demand Agents
+| Agent | Use Case |
+|-------|----------|
+| `Explore` | Understanding codebase structure |
+| `Plan` | Major feature planning |
+
+### Thinking Modes for Complex Tasks
+Use extended thinking for architecture decisions: `think hard` or `ultrathink`
+
+---
+
+## File References
+
+- Entry point: `src/main.rs:1`
+- Error types: `src/error.rs:10` (AppError), `src/error.rs:50` (NvmlError)
+- CLI args: `src/cli/args.rs:14` (Cli struct)
+- GpuDevice trait: `src/nvml/traits.rs:12`
+- Mock device: `src/mock.rs:15`
+- Fan domain: `src/domain/fan.rs:10` (FanSpeed)
+- Config: `src/config/mod.rs:20` (Config struct)
+
+---
+
+## Logging
 
 ```rust
 use log::{debug, info, warn, error};
 
-// Debug: Internal details
-debug!("Calculating fan curve for temp={}", temp);
-
-// Info: User-visible operations
-info!("Setting fan speed to {}%", speed);
-
-// Warn: Recoverable issues
-warn!("Fan {} not responding, retrying", fan_idx);
-
-// Error: Failures
-error!("Failed to set power limit: {}", e);
+debug!("Internal: temp={}", temp);      // Debug details
+info!("Setting fan to {}%", speed);     // User operations
+warn!("Fan {} unresponsive", idx);      // Recoverable
+error!("Power limit failed: {}", e);    // Failures
 ```
 
 ---
 
-## Agent Skills Reference
+## Quality Checklist
 
-| Skill | When to Use |
-|-------|-------------|
-| `code-reviewer` | After writing significant code |
-| `code-simplifier` | When code is complex or verbose |
-| `Explore` | To understand codebase structure |
-| `Plan` | Before implementing major features |
-| `pr-test-analyzer` | Before creating a PR |
-| `silent-failure-hunter` | After adding error handling |
-
----
-
-## Quick Reference
-
-### Common Patterns
-
-```rust
-// Propagate errors
-fn example() -> Result<(), AppError> {
-    let device = get_device()?;
-    device.set_fan_speed(0, speed)?;
-    Ok(())
-}
-
-// Map errors
-let result = nvml_call()
-    .map_err(NvmlError::from)?;
-
-// Option to Result
-let device = devices.get(idx)
-    .ok_or(AppError::GpuNotFound(idx))?;
-```
-
-### Derive Attributes
-```rust
-// Small value types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-
-// Data structures
-#[derive(Debug, Clone, Serialize, Deserialize)]
-
-// Error types
-#[derive(Error, Debug)]
-```
+Before completing any task:
+- [ ] `make check` passes (fmt + lint + test)
+- [ ] No `.unwrap()` or `.expect()` in library code
+- [ ] New public items have `///` docs
+- [ ] Domain types validate input
+- [ ] Binary builds: `make build` (outputs to `bin/`)

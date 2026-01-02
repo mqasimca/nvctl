@@ -2,7 +2,8 @@
 //!
 //! Defines all command-line arguments and subcommands.
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 /// NVML-based GPU control tool
 ///
@@ -64,6 +65,13 @@ pub enum Commands {
 
     /// Start the control loop daemon
     Control(ControlArgs),
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 /// Arguments for the info command
@@ -210,6 +218,13 @@ pub enum OutputFormat {
     Json,
     /// Compact single-line format
     Compact,
+}
+
+/// Generate shell completions and print to stdout
+pub fn generate_completions(shell: Shell) {
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
 }
 
 #[cfg(test)]

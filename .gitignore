@@ -1,5 +1,7 @@
 # Build artifacts
 /target/
+/bin/
+/completions/
 
 # Editor/IDE
 .idea/
