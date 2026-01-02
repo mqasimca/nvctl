@@ -1,0 +1,45 @@
+[package]
+name = "nvctl"
+version = "0.1.0"
+edition = "2021"
+authors = ["nvctl contributors"]
+description = "NVML-based GPU control tool for fan curves, power limits, and thermal management"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/your-repo/nvctl"
+keywords = ["nvidia", "gpu", "nvml", "fan-control", "power-management"]
+categories = ["command-line-utilities", "hardware-support"]
+
+[dependencies]
+nvml-wrapper = "0.11"
+nvml-wrapper-sys = "0.9"
+libloading = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "z"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[[bin]]
+name = "nvctl"
+path = "src/main.rs"
+
+[lib]
+name = "nvctl"
+path = "src/lib.rs"
