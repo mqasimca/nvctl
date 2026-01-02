@@ -113,9 +113,10 @@ impl GpuDevice for NvmlDevice<'_> {
         // These are not exposed by nvml-wrapper's high-level API
         let handle = unsafe { self.device.handle() };
 
-        let current = get_temperature_threshold_raw(handle, NVML_TEMPERATURE_THRESHOLD_ACOUSTIC_CURR)
-            .ok()
-            .map(Temperature::new);
+        let current =
+            get_temperature_threshold_raw(handle, NVML_TEMPERATURE_THRESHOLD_ACOUSTIC_CURR)
+                .ok()
+                .map(Temperature::new);
 
         let min = get_temperature_threshold_raw(handle, NVML_TEMPERATURE_THRESHOLD_ACOUSTIC_MIN)
             .ok()
@@ -130,7 +131,11 @@ impl GpuDevice for NvmlDevice<'_> {
 
     fn set_acoustic_limit(&mut self, temp: Temperature) -> Result<(), NvmlError> {
         let handle = unsafe { self.device.handle() };
-        set_temperature_threshold_raw(handle, NVML_TEMPERATURE_THRESHOLD_ACOUSTIC_CURR, temp.as_celsius())
+        set_temperature_threshold_raw(
+            handle,
+            NVML_TEMPERATURE_THRESHOLD_ACOUSTIC_CURR,
+            temp.as_celsius(),
+        )
     }
 
     fn fan_count(&self) -> Result<u32, NvmlError> {
@@ -264,11 +269,8 @@ fn set_temperature_threshold_raw(
     use nvml_wrapper_sys::bindings::nvmlReturn_enum_NVML_SUCCESS;
     use std::os::raw::c_int;
 
-    type SetThresholdFn = unsafe extern "C" fn(
-        nvml_wrapper_sys::bindings::nvmlDevice_t,
-        u32,
-        *mut c_int,
-    ) -> u32;
+    type SetThresholdFn =
+        unsafe extern "C" fn(nvml_wrapper_sys::bindings::nvmlDevice_t, u32, *mut c_int) -> u32;
 
     let lib = unsafe { Library::new("libnvidia-ml.so.1") }
         .map_err(|e| NvmlError::Unknown(format!("Failed to load NVML library: {}", e)))?;

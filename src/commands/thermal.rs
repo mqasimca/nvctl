@@ -47,8 +47,12 @@ fn run_thermal_status(
             gpu_name: info.name,
             gpu_index: idx,
             current_temp,
-            acoustic_current: acoustic.as_ref().and_then(|a| a.current.map(|t| t.as_celsius())),
-            acoustic_min: acoustic.as_ref().and_then(|a| a.min.map(|t| t.as_celsius())),
+            acoustic_current: acoustic
+                .as_ref()
+                .and_then(|a| a.current.map(|t| t.as_celsius())),
+            acoustic_min: acoustic
+                .as_ref()
+                .and_then(|a| a.min.map(|t| t.as_celsius())),
             acoustic_max: acoustic.and_then(|a| a.max.map(|t| t.as_celsius())),
         };
 

@@ -90,8 +90,7 @@ pub fn run_info(args: &InfoArgs, format: OutputFormat, gpu_index: Option<u32>) -
                 slowdown_threshold: thresholds
                     .as_ref()
                     .and_then(|t| t.slowdown.map(|v| v.as_celsius())),
-                max_threshold: thresholds
-                    .and_then(|t| t.gpu_max.map(|v| v.as_celsius())),
+                max_threshold: thresholds.and_then(|t| t.gpu_max.map(|v| v.as_celsius())),
             };
 
             print_output(&thermal_status, format)?;
