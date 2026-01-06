@@ -1,16 +1,16 @@
-//! Power bar widget
+//! Power gauge widget
 //!
-//! Glossy horizontal bar with vibrant colors showing power usage vs limit.
+//! Glossy circular arc gauge with vibrant colors showing power usage vs limit.
 
 use crate::message::Message;
 use crate::theme::colors;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
-use iced::{mouse, Point, Rectangle, Renderer, Theme};
+use iced::{mouse, Color, Point, Radians, Rectangle, Renderer, Theme, Vector};
 use nvctl::domain::{PowerConstraints, PowerLimit};
 
-/// Power bar widget with neon glow effect
+/// Power gauge widget with glossy glass effect
 pub struct PowerBar {
     usage: PowerLimit,
     limit: PowerLimit,
@@ -18,7 +18,7 @@ pub struct PowerBar {
 }
 
 impl PowerBar {
-    /// Create a new power bar
+    /// Create a new power gauge
     pub fn new(
         usage: PowerLimit,
         limit: PowerLimit,
@@ -52,206 +52,223 @@ impl canvas::Program<Message> for PowerBar {
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
+        let center = frame.center();
+        let radius = bounds.width.min(bounds.height) / 2.0 - 20.0;
 
-        let padding = 15.0;
-        let bar_height = 24.0;
-        let bar_width = bounds.width - padding * 2.0;
-        let bar_y = bounds.height / 2.0 + 8.0;
-        let bar_radius = bar_height / 2.0;
+        // Arc configuration: 270° sweep, starting from bottom-left
+        let start_angle = 135.0_f32.to_radians();
+        let sweep = 270.0_f32.to_radians();
 
-        let ratio = self.ratio();
-        // Use smooth gradient based on power ratio
-        let main_color = colors::lerp(colors::ACCENT_GREEN, colors::ACCENT_RED, ratio);
+        // Calculate power ratio and angle
+        let power_ratio = self.ratio();
+        let value_angle = start_angle + sweep * power_ratio;
+
+        // Get gradient color based on power ratio (green -> orange -> red)
+        let main_color = colors::lerp(colors::ACCENT_GREEN, colors::ACCENT_RED, power_ratio);
         let bright_color = colors::glossy_highlight(main_color);
 
         // ═══════════════════════════════════════════════════════════════════════
-        // BACKGROUND BAR - Glossy glass track
+        // GLOSSY CENTER DISK - Glass effect background
         // ═══════════════════════════════════════════════════════════════════════
-        let bg_rect = rounded_rect(padding, bar_y, bar_width, bar_height, bar_radius);
-        frame.fill(&bg_rect, colors::BG_ELEVATED);
+        let inner_radius = radius - 22.0;
 
-        // Glass highlight on track (top edge)
-        let highlight_line = Path::line(
-            Point::new(padding + bar_radius, bar_y + 2.0),
-            Point::new(padding + bar_width - bar_radius, bar_y + 2.0),
+        // Base glass circle
+        let glass_bg = Path::circle(center, inner_radius);
+        frame.fill(&glass_bg, colors::BG_SURFACE);
+
+        // Glass highlight (top arc shine)
+        draw_arc(
+            &mut frame,
+            center,
+            inner_radius - 2.0,
+            200.0_f32.to_radians(),
+            340.0_f32.to_radians(),
+            3.0,
+            colors::GLASS_SHINE,
         );
+
+        // Subtle ring around center
+        let center_ring = Path::circle(center, inner_radius);
         frame.stroke(
-            &highlight_line,
+            &center_ring,
             Stroke::default()
-                .with_width(2.0)
-                .with_color(colors::GLASS_HIGHLIGHT)
-                .with_line_cap(canvas::LineCap::Round),
+                .with_width(1.5)
+                .with_color(colors::with_alpha(main_color, 0.3)),
         );
 
         // ═══════════════════════════════════════════════════════════════════════
-        // FILLED PORTION - Glossy colorful fill
+        // BACKGROUND TRACK - Clean glossy track
         // ═══════════════════════════════════════════════════════════════════════
-        if ratio > 0.0 {
-            let fill_width = (bar_width * ratio).max(bar_height);
+        draw_arc(
+            &mut frame,
+            center,
+            radius,
+            start_angle,
+            start_angle + sweep,
+            12.0,
+            colors::BG_ELEVATED,
+        );
 
+        // Track highlight (glossy top edge)
+        draw_arc(
+            &mut frame,
+            center,
+            radius + 4.0,
+            start_angle,
+            start_angle + sweep,
+            2.0,
+            colors::GLASS_HIGHLIGHT,
+        );
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // VALUE ARC - Colorful glossy fill with gradient
+        // ═══════════════════════════════════════════════════════════════════════
+        if power_ratio > 0.0 {
             // Outer soft glow
-            let glow_rect = rounded_rect(
-                padding - 3.0,
-                bar_y - 3.0,
-                fill_width + 6.0,
-                bar_height + 6.0,
-                bar_radius + 3.0,
+            draw_arc(
+                &mut frame,
+                center,
+                radius,
+                start_angle,
+                value_angle,
+                20.0,
+                colors::with_alpha(main_color, 0.15),
             );
-            frame.fill(&glow_rect, colors::with_alpha(main_color, 0.12));
 
-            // Main fill
-            let fill_rect = rounded_rect(padding, bar_y, fill_width, bar_height, bar_radius);
-            frame.fill(&fill_rect, main_color);
+            // Main colored arc
+            draw_arc(
+                &mut frame,
+                center,
+                radius,
+                start_angle,
+                value_angle,
+                12.0,
+                main_color,
+            );
 
-            // Glossy highlight on top
-            if fill_width > bar_height {
-                let hl_line = Path::line(
-                    Point::new(padding + bar_radius, bar_y + 4.0),
-                    Point::new(padding + fill_width - bar_radius, bar_y + 4.0),
-                );
-                frame.stroke(
-                    &hl_line,
-                    Stroke::default()
-                        .with_width(3.0)
-                        .with_color(colors::with_alpha(bright_color, 0.5))
-                        .with_line_cap(canvas::LineCap::Round),
-                );
-            }
+            // Glossy shine on top of arc (bright highlight)
+            draw_arc(
+                &mut frame,
+                center,
+                radius + 3.0,
+                start_angle,
+                value_angle,
+                3.0,
+                colors::with_alpha(bright_color, 0.5),
+            );
 
-            // End cap orb
-            let end_x = padding + fill_width - bar_radius;
-            let end_y = bar_y + bar_height / 2.0;
-
-            // Outer glow
-            let end_glow_outer = Path::circle(Point::new(end_x, end_y), 16.0);
-            frame.fill(&end_glow_outer, colors::with_alpha(main_color, 0.15));
-
-            // Core orb
-            let end_core = Path::circle(Point::new(end_x, end_y), 8.0);
-            frame.fill(&end_core, main_color);
-
-            // Glossy highlight spot
-            let end_highlight = Path::circle(Point::new(end_x - 2.0, end_y - 2.0), 3.5);
-            frame.fill(&end_highlight, colors::with_alpha(bright_color, 0.6));
+            // Inner bright edge
+            draw_arc(
+                &mut frame,
+                center,
+                radius - 4.0,
+                start_angle,
+                value_angle,
+                2.0,
+                colors::with_alpha(colors::TEXT_PRIMARY, 0.15),
+            );
         }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // BORDER - Clean subtle outline
+        // END CAP - Glossy glowing orb
         // ═══════════════════════════════════════════════════════════════════════
-        let border = rounded_rect(padding, bar_y, bar_width, bar_height, bar_radius);
-        frame.stroke(
-            &border,
-            Stroke::default()
-                .with_width(1.0)
-                .with_color(colors::GLASS_BORDER),
-        );
+        if power_ratio > 0.01 {
+            let end_x = center.x + radius * value_angle.cos();
+            let end_y = center.y + radius * value_angle.sin();
+
+            // Outer glow halo
+            let outer_glow = Path::circle(Point::new(end_x, end_y), 14.0);
+            frame.fill(&outer_glow, colors::with_alpha(main_color, 0.2));
+
+            // Mid glow
+            let mid_glow = Path::circle(Point::new(end_x, end_y), 10.0);
+            frame.fill(&mid_glow, colors::with_alpha(main_color, 0.4));
+
+            // Core orb
+            let core_dot = Path::circle(Point::new(end_x, end_y), 7.0);
+            frame.fill(&core_dot, main_color);
+
+            // Glossy highlight spot (top-left)
+            let highlight = Path::circle(Point::new(end_x - 2.0, end_y - 2.0), 3.0);
+            frame.fill(&highlight, colors::with_alpha(bright_color, 0.7));
+        }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // POWER TEXT - Clean display above bar
+        // DEFAULT POWER LIMIT MARKER - Gold indicator on track
+        // ═══════════════════════════════════════════════════════════════════════
+        if let Some(ref constraints) = self.constraints {
+            if constraints.max.as_watts() > 0 && self.limit.as_watts() > 0 {
+                let default_ratio =
+                    constraints.default.as_watts() as f32 / constraints.max.as_watts() as f32;
+                let marker_angle = start_angle + sweep * default_ratio;
+
+                let marker_x = center.x + radius * marker_angle.cos();
+                let marker_y = center.y + radius * marker_angle.sin();
+
+                // Gold marker dot
+                let marker_glow = Path::circle(Point::new(marker_x, marker_y), 8.0);
+                frame.fill(&marker_glow, colors::with_alpha(colors::ACCENT_GOLD, 0.3));
+
+                let marker_dot = Path::circle(Point::new(marker_x, marker_y), 4.0);
+                frame.fill(&marker_dot, colors::ACCENT_GOLD);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // POWER TEXT - Clean, bold centered
         // ═══════════════════════════════════════════════════════════════════════
         let power_text = format!("{}W", self.usage.as_watts());
         frame.fill_text(Text {
             content: power_text,
-            position: Point::new(padding, bar_y - 26.0),
+            position: center + Vector::new(0.0, -4.0),
             color: colors::TEXT_PRIMARY,
-            size: 30.0.into(),
-            horizontal_alignment: Horizontal::Left,
+            size: 32.0.into(),
+            horizontal_alignment: Horizontal::Center,
             vertical_alignment: Vertical::Center,
             ..Text::default()
         });
 
-        // Limit text in accent color
-        let limit_text = format!("/ {}W", self.limit.as_watts());
-        frame.fill_text(Text {
-            content: limit_text,
-            position: Point::new(padding + 68.0, bar_y - 26.0),
-            color: colors::with_alpha(main_color, 0.7),
-            size: 14.0.into(),
-            horizontal_alignment: Horizontal::Left,
-            vertical_alignment: Vertical::Center,
-            ..Text::default()
-        });
-
-        // Label below bar in accent color
+        // Unit label in accent color
         frame.fill_text(Text {
             content: "POWER".to_string(),
-            position: Point::new(padding, bar_y + bar_height + 10.0),
+            position: center + Vector::new(0.0, 20.0),
             color: colors::with_alpha(main_color, 0.8),
             size: 11.0.into(),
-            horizontal_alignment: Horizontal::Left,
+            horizontal_alignment: Horizontal::Center,
             vertical_alignment: Vertical::Center,
             ..Text::default()
         });
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // DEFAULT MARKER - Clean indicator
-        // ═══════════════════════════════════════════════════════════════════════
-        if let Some(ref constraints) = self.constraints {
-            if constraints.max.as_watts() > 0 {
-                let default_ratio =
-                    constraints.default.as_watts() as f32 / constraints.max.as_watts() as f32;
-                let marker_x = padding + bar_width * default_ratio;
-
-                // Marker line with glow
-                let marker_glow = Path::line(
-                    Point::new(marker_x, bar_y - 4.0),
-                    Point::new(marker_x, bar_y + bar_height + 4.0),
-                );
-                frame.stroke(
-                    &marker_glow,
-                    Stroke::default()
-                        .with_width(4.0)
-                        .with_color(colors::with_alpha(colors::ACCENT_GOLD, 0.2)),
-                );
-
-                let marker = Path::line(
-                    Point::new(marker_x, bar_y - 2.0),
-                    Point::new(marker_x, bar_y + bar_height + 2.0),
-                );
-                frame.stroke(
-                    &marker,
-                    Stroke::default()
-                        .with_width(2.0)
-                        .with_color(colors::ACCENT_GOLD)
-                        .with_line_cap(canvas::LineCap::Round),
-                );
-
-                // Diamond marker at top
-                let diamond = Path::new(|builder| {
-                    builder.move_to(Point::new(marker_x, bar_y - 8.0));
-                    builder.line_to(Point::new(marker_x + 4.0, bar_y - 4.0));
-                    builder.line_to(Point::new(marker_x, bar_y));
-                    builder.line_to(Point::new(marker_x - 4.0, bar_y - 4.0));
-                    builder.close();
-                });
-                frame.fill(&diamond, colors::ACCENT_GOLD);
-            }
-        }
 
         vec![frame.into_geometry()]
     }
 }
 
-/// Create a rounded rectangle path
-fn rounded_rect(x: f32, y: f32, width: f32, height: f32, radius: f32) -> Path {
-    Path::new(|builder| {
-        let r = radius.min(width / 2.0).min(height / 2.0);
+/// Draw an arc with round caps
+fn draw_arc(
+    frame: &mut Frame,
+    center: Point,
+    radius: f32,
+    start: f32,
+    end: f32,
+    width: f32,
+    color: Color,
+) {
+    let arc = Path::new(|builder| {
+        builder.arc(canvas::path::Arc {
+            center,
+            radius,
+            start_angle: Radians(start),
+            end_angle: Radians(end),
+        });
+    });
 
-        builder.move_to(Point::new(x + r, y));
-        builder.line_to(Point::new(x + width - r, y));
-        builder.arc_to(Point::new(x + width, y), Point::new(x + width, y + r), r);
-        builder.line_to(Point::new(x + width, y + height - r));
-        builder.arc_to(
-            Point::new(x + width, y + height),
-            Point::new(x + width - r, y + height),
-            r,
-        );
-        builder.line_to(Point::new(x + r, y + height));
-        builder.arc_to(Point::new(x, y + height), Point::new(x, y + height - r), r);
-        builder.line_to(Point::new(x, y + r));
-        builder.arc_to(Point::new(x, y), Point::new(x + r, y), r);
-        builder.close();
-    })
+    frame.stroke(
+        &arc,
+        Stroke::default()
+            .with_width(width)
+            .with_color(color)
+            .with_line_cap(canvas::LineCap::Round),
+    );
 }
 
 #[cfg(test)]
@@ -259,18 +276,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_power_bar_ratio() {
-        let bar = PowerBar::new(
+    fn test_power_gauge_ratio() {
+        let gauge = PowerBar::new(
             PowerLimit::from_watts(150),
             PowerLimit::from_watts(300),
             None,
         );
-        assert!((bar.ratio() - 0.5).abs() < 0.001);
+        assert!((gauge.ratio() - 0.5).abs() < 0.001);
     }
 
     #[test]
-    fn test_power_bar_zero_limit() {
-        let bar = PowerBar::new(PowerLimit::from_watts(100), PowerLimit::from_watts(0), None);
-        assert_eq!(bar.ratio(), 0.0);
+    fn test_power_gauge_zero_limit() {
+        let gauge = PowerBar::new(PowerLimit::from_watts(100), PowerLimit::from_watts(0), None);
+        assert_eq!(gauge.ratio(), 0.0);
     }
 }
