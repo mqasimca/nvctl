@@ -1,0 +1,38 @@
+# Build artifacts - large, generated
+target/
+bin/
+completions/
+
+# Lock file - auto-generated, large
+Cargo.lock
+
+# Editor/IDE config - not relevant to code
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation assets (keep README.md)
+docs/
+
+# Git internals
+.git/
+
+# Test fixtures and snapshots (access when needed)
+**/snapshots/
+**/*.snap
+
+# Generated shell completions
+*.bash
+*.zsh
+*.fish
+*.ps1
+
+# Plan files
+*plan
+*plan.md

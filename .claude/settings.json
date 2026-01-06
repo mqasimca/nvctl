@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash(git commit:*)",
         "hooks": [
           {
             "type": "command",
@@ -15,7 +15,8 @@
   "agents": {
     "preferred": [
       "code-reviewer",
-      "type-design-analyzer"
+      "type-design-analyzer",
+      "code-simplifier"
     ]
   },
   "rules": {
@@ -24,6 +25,16 @@
       "architecture": "elm",
       "no_unwrap": true,
       "require_cache": true
+    },
+    "lib": {
+      "no_unwrap": true,
+      "require_tests": true,
+      "use_traits": true
     }
+  },
+  "skills": {
+    "check": ".claude/skills/check.md",
+    "build": ".claude/skills/build.md",
+    "gui": ".claude/skills/gui.md"
   }
 }

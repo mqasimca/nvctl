@@ -153,12 +153,24 @@ Use extended thinking for architecture decisions: `think hard` or `ultrathink`
 
 ## File References
 
+### Core
 - Entry point: `src/main.rs:1`
 - Error types: `src/error.rs:10` (AppError), `src/error.rs:50` (NvmlError)
 - CLI args: `src/cli/args.rs:14` (Cli struct)
-- GpuDevice trait: `src/nvml/traits.rs:12`
-- Mock device: `src/mock.rs:15`
-- Fan domain: `src/domain/fan.rs:10` (FanSpeed)
+
+### NVML Layer
+- GpuDevice trait: `src/nvml/traits.rs:16` (all GPU operations)
+- NVML implementation: `src/nvml/device.rs:23` (NvmlDevice)
+- Mock device: `src/mock.rs:17` (MockDevice for tests)
+
+### Domain Types
+- Fan: `src/domain/fan.rs:10` (FanSpeed, FanPolicy, FanCurve)
+- Thermal: `src/domain/thermal.rs:1` (Temperature, ThermalThresholds)
+- Power: `src/domain/power.rs:1` (PowerLimit, PowerConstraints)
+- Performance: `src/domain/performance.rs:1` (ClockSpeed, Utilization, MemoryInfo, PerformanceState)
+- GPU Info: `src/domain/gpu.rs:1` (GpuInfo)
+
+### Config
 - Config: `src/config/mod.rs:20` (Config struct)
 
 ---

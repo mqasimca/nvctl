@@ -211,12 +211,30 @@ button("Apply")
 
 ## File References
 
+### Core
 - Entry point: `src/main.rs:1`
 - Application: `src/app.rs:20` (App struct)
-- Messages: `src/message.rs:1` (Message enum)
-- Theme: `src/theme.rs:1` (colors, custom theme)
-- Temp Gauge Widget: `src/widgets/temp_gauge.rs:10`
-- Fan Curve Editor: `src/widgets/fan_curve.rs:15`
+- Messages: `src/message.rs:1` (Message enum, GpuStateSnapshot)
+- State: `src/state.rs:19` (AppState, GpuState, MetricsHistory)
+- Theme: `src/theme.rs:1` (colors, gradients, custom theme)
+
+### Widgets (Canvas-based)
+- Temp Gauge: `src/widgets/temp_gauge.rs:14` (circular temperature gauge)
+- Fan Gauge: `src/widgets/fan_gauge.rs:1` (circular fan speed gauge)
+- Power Gauge: `src/widgets/power_bar.rs:14` (circular power gauge)
+- Util Gauge: `src/widgets/util_gauge.rs:1` (GPU utilization gauge)
+- VRAM Bar: `src/widgets/vram_bar.rs:1` (horizontal VRAM usage bar)
+- Multi-Series Graph: `src/widgets/multi_series_graph.rs:1` (performance history)
+- Fan Curve Editor: `src/widgets/fan_curve.rs:15` (interactive curve editor)
+
+### Views
+- Dashboard: `src/views/dashboard.rs:1` (main dashboard)
+- Fan Control: `src/views/fan_control.rs:1`
+- Power Control: `src/views/power_control.rs:1`
+- Thermal: `src/views/thermal.rs:1`
+
+### Services
+- GPU Monitor: `src/services/gpu_monitor.rs:1` (polling service)
 
 ---
 
