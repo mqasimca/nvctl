@@ -3,8 +3,8 @@
 //! These traits abstract over NVML to enable testing with mocks.
 
 use crate::domain::{
-    AcousticLimits, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit, Temperature,
-    ThermalThresholds,
+    AcousticLimits, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit,
+    Temperature, ThermalThresholds,
 };
 use crate::error::NvmlError;
 
@@ -56,6 +56,12 @@ pub trait GpuDevice: Send + Sync {
 
     /// Set fan control policy
     fn set_fan_policy(&mut self, fan_idx: u32, policy: FanPolicy) -> Result<(), NvmlError>;
+
+    /// Get what component a fan/cooler is designed to cool
+    ///
+    /// Returns the target (GPU, Memory, Power Supply, etc.) that this fan cools.
+    /// This can help identify fan positions (e.g., exhaust fans often cool power supply).
+    fn cooler_target(&self, fan_idx: u32) -> Result<CoolerTarget, NvmlError>;
 
     // Power operations
     /// Get current power limit

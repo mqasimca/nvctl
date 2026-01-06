@@ -190,6 +190,108 @@ pub enum FanPolicy {
     Manual,
 }
 
+/// What component a fan/cooler is designed to cool
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoolerTarget {
+    /// Cooler cools nothing specific
+    None,
+    /// Cooler targets the GPU die
+    Gpu,
+    /// Cooler targets memory chips
+    Memory,
+    /// Cooler targets power supply/VRMs
+    PowerSupply,
+    /// Cooler targets all GPU-related components
+    All,
+    /// Unknown target
+    Unknown(u32),
+}
+
+impl CoolerTarget {
+    /// Create from raw NVML value
+    pub fn from_raw(value: u32) -> Self {
+        match value {
+            1 => CoolerTarget::None,
+            2 => CoolerTarget::Gpu,
+            4 => CoolerTarget::Memory,
+            8 => CoolerTarget::PowerSupply,
+            14 => CoolerTarget::All, // GPU | Memory | PowerSupply
+            _ => CoolerTarget::Unknown(value),
+        }
+    }
+
+    /// Get a human-readable description
+    pub fn description(&self) -> &'static str {
+        match self {
+            CoolerTarget::None => "No specific target",
+            CoolerTarget::Gpu => "GPU die",
+            CoolerTarget::Memory => "Memory",
+            CoolerTarget::PowerSupply => "VRM/Power",
+            CoolerTarget::All => "All components",
+            CoolerTarget::Unknown(_) => "Unknown",
+        }
+    }
+
+    /// Suggest a position based on target
+    pub fn suggested_position(&self) -> &'static str {
+        match self {
+            CoolerTarget::Gpu => "Center",
+            CoolerTarget::Memory => "Side",
+            CoolerTarget::PowerSupply => "Back/Exhaust",
+            CoolerTarget::All => "Main",
+            _ => "Unknown",
+        }
+    }
+}
+
+impl fmt::Display for CoolerTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.description())
+    }
+}
+
+/// Information about a single fan/cooler
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanInfo {
+    /// Fan index (0-based)
+    pub index: u32,
+    /// What this fan cools
+    pub target: CoolerTarget,
+    /// User-defined label (e.g., "Front Left", "Back Exhaust")
+    pub label: Option<String>,
+}
+
+impl FanInfo {
+    /// Create new fan info
+    pub fn new(index: u32, target: CoolerTarget) -> Self {
+        Self {
+            index,
+            target,
+            label: None,
+        }
+    }
+
+    /// Set a custom label
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Get display name (label or auto-generated)
+    pub fn display_name(&self) -> String {
+        if let Some(ref label) = self.label {
+            label.clone()
+        } else {
+            format!(
+                "Fan {} ({})",
+                self.index + 1,
+                self.target.suggested_position()
+            )
+        }
+    }
+}
+
 impl fmt::Display for FanPolicy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -15,5 +15,6 @@
 Thumbs.db
 
 # Project specific
-docs/
 *plan
+
+docs/

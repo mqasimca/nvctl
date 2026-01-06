@@ -21,7 +21,9 @@ pub mod error;
 pub mod nvml;
 pub mod services;
 
-#[cfg(test)]
+/// Mock implementations for testing
+/// Available when the "mock" feature is enabled or during tests
+#[cfg(any(test, feature = "mock"))]
 pub mod mock;
 
 pub use error::{AppError, Result};

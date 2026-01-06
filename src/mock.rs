@@ -3,8 +3,8 @@
 //! Provides mock GPU device and manager for unit testing without real hardware.
 
 use crate::domain::{
-    AcousticLimits, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit, Temperature,
-    ThermalThresholds,
+    AcousticLimits, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit,
+    Temperature, ThermalThresholds,
 };
 use crate::error::NvmlError;
 use crate::nvml::{GpuDevice, GpuManager};
@@ -187,6 +187,18 @@ impl GpuDevice for MockDevice {
         }
         self.fan_policies.lock().unwrap().insert(fan_idx, policy);
         Ok(())
+    }
+
+    fn cooler_target(&self, fan_idx: u32) -> Result<CoolerTarget, NvmlError> {
+        // Mock implementation: assign targets based on fan index
+        // This simulates a typical 4-fan GPU layout
+        match fan_idx {
+            0 => Ok(CoolerTarget::Gpu),         // Center fan, cools GPU
+            1 => Ok(CoolerTarget::Memory),      // Side fan, cools memory
+            2 => Ok(CoolerTarget::Memory),      // Side fan, cools memory
+            3 => Ok(CoolerTarget::PowerSupply), // Back fan, cools VRM
+            _ => Ok(CoolerTarget::All),         // Default for unknown
+        }
     }
 
     fn power_limit(&self) -> Result<PowerLimit, NvmlError> {

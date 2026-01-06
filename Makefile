@@ -98,6 +98,38 @@ ci-full: clean fmt-check lint test release
 ci: ci-full
 
 # =============================================================================
+# GUI Targets
+# =============================================================================
+
+.PHONY: gui gui-dev gui-check gui-test gui-build gui-clean
+
+## Run GUI in release mode (smooth animations)
+gui:
+	cargo run --release --package nvctl-gui
+
+## Run GUI in debug mode
+gui-dev:
+	cargo run --package nvctl-gui
+
+## Check GUI code (fmt + clippy)
+gui-check:
+	cargo fmt --package nvctl-gui -- --check
+	cargo clippy --package nvctl-gui -- -D warnings
+
+## Run GUI tests
+gui-test:
+	cargo test --package nvctl-gui
+
+## Build GUI release binary
+gui-build:
+	cargo build --release --package nvctl-gui
+	@echo "Binary: target/release/nvctl-gui"
+
+## Clean GUI build artifacts
+gui-clean:
+	cargo clean --package nvctl-gui
+
+# =============================================================================
 # Development
 # =============================================================================
 
@@ -183,6 +215,14 @@ help:
 	@echo "  ci          Full CI pipeline (clean + checks + release)"
 	@echo "  ci-quick    Quick checks (fmt + lint + test)"
 	@echo "  ci-full     Full CI pipeline"
+	@echo ""
+	@echo "GUI:"
+	@echo "  gui         Run GUI (release mode, smooth animations)"
+	@echo "  gui-dev     Run GUI (debug mode)"
+	@echo "  gui-check   Check GUI (fmt + clippy)"
+	@echo "  gui-test    Run GUI tests"
+	@echo "  gui-build   Build GUI release binary"
+	@echo "  gui-clean   Clean GUI build artifacts"
 	@echo ""
 	@echo "Completions:"
 	@echo "  completions         Generate shell completions to completions/"

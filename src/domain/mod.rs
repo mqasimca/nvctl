@@ -8,7 +8,7 @@ pub mod gpu;
 pub mod power;
 pub mod thermal;
 
-pub use fan::{FanCurve, FanCurvePoint, FanPolicy, FanSpeed};
+pub use fan::{CoolerTarget, FanCurve, FanCurvePoint, FanInfo, FanPolicy, FanSpeed};
 pub use gpu::GpuInfo;
 pub use power::{PowerConstraints, PowerLimit};
 pub use thermal::{AcousticLimits, Temperature, ThermalThresholds};

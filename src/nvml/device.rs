@@ -3,8 +3,8 @@
 //! Real implementation of GpuDevice trait using nvml-wrapper.
 
 use crate::domain::{
-    AcousticLimits, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit, Temperature,
-    ThermalThresholds,
+    AcousticLimits, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit,
+    Temperature, ThermalThresholds,
 };
 use crate::error::NvmlError;
 use crate::nvml::traits::GpuDevice;
@@ -186,6 +186,13 @@ impl GpuDevice for NvmlDevice<'_> {
             .map_err(Self::convert_error)
     }
 
+    fn cooler_target(&self, _fan_idx: u32) -> Result<CoolerTarget, NvmlError> {
+        // Use raw FFI to get cooler info
+        // Note: nvmlDeviceGetCoolerInfo doesn't take a fan index, it returns info for all coolers
+        let handle = unsafe { self.device.handle() };
+        get_cooler_target_raw(handle)
+    }
+
     fn power_limit(&self) -> Result<PowerLimit, NvmlError> {
         let limit_mw = self
             .device
@@ -290,5 +297,56 @@ fn set_temperature_threshold_raw(
             "Root privileges required to set temperature threshold".to_string(),
         )),
         code => Err(NvmlError::Unknown(format!("NVML error code: {}", code))),
+    }
+}
+
+/// Get cooler target information using raw FFI
+///
+/// Returns what the cooler is designed to cool (GPU, Memory, Power Supply, etc.)
+fn get_cooler_target_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<CoolerTarget, NvmlError> {
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::nvmlReturn_enum_NVML_SUCCESS;
+    use std::os::raw::c_uint;
+
+    // nvmlCoolerInfo_t structure
+    #[repr(C)]
+    struct NvmlCoolerInfo {
+        signal_type: c_uint,
+        target: c_uint,
+    }
+
+    type GetCoolerInfoFn = unsafe extern "C" fn(
+        nvml_wrapper_sys::bindings::nvmlDevice_t,
+        *mut NvmlCoolerInfo,
+    ) -> c_uint;
+
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .map_err(|e| NvmlError::Unknown(format!("Failed to load NVML library: {}", e)))?;
+
+    let func: Symbol<GetCoolerInfoFn> =
+        unsafe { lib.get(b"nvmlDeviceGetCoolerInfo") }.map_err(|e| {
+            NvmlError::NotSupported(format!("nvmlDeviceGetCoolerInfo not available: {}", e))
+        })?;
+
+    let mut cooler_info = NvmlCoolerInfo {
+        signal_type: 0,
+        target: 0,
+    };
+
+    let result = unsafe { func(handle, &mut cooler_info) };
+
+    if result == nvmlReturn_enum_NVML_SUCCESS {
+        Ok(CoolerTarget::from_raw(cooler_info.target))
+    } else if result == 3 {
+        // NVML_ERROR_NOT_SUPPORTED - function exists but not supported on this GPU
+        // Return a sensible default
+        Ok(CoolerTarget::All)
+    } else {
+        Err(NvmlError::Unknown(format!(
+            "nvmlDeviceGetCoolerInfo error code: {}",
+            result
+        )))
     }
 }
