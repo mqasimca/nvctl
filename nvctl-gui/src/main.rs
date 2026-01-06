@@ -72,8 +72,11 @@ fn acquire_instance_lock() -> Option<File> {
 }
 
 fn main() -> iced::Result {
-    // Initialize logging
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Initialize logging with wgpu noise filtered out
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .filter_module("wgpu_hal", log::LevelFilter::Error)
+        .filter_module("wgpu_core", log::LevelFilter::Error)
+        .init();
 
     // Parse CLI arguments
     let args = Args::parse();
