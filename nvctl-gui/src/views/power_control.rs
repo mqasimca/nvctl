@@ -112,9 +112,14 @@ fn view_power_status(gpu: &GpuState) -> Element<'_, Message> {
 
     let power_widget = PowerBar::new(gpu.power_usage, gpu.power_limit, gpu.power_constraints);
     let power_canvas: Element<'_, Message> = Canvas::new(power_widget)
-        .width(Length::Fill)
-        .height(Length::Fixed(80.0))
+        .width(Length::Fixed(180.0))
+        .height(Length::Fixed(180.0))
         .into();
+
+    // Center the gauge
+    let gauge_centered = container(power_canvas)
+        .width(Length::Fill)
+        .center_x(Length::Fill);
 
     let usage_row = row![
         text("Usage:")
@@ -147,7 +152,7 @@ fn view_power_status(gpu: &GpuState) -> Element<'_, Message> {
     ]
     .align_y(Alignment::Center);
 
-    container(column![title, power_canvas, usage_row, percentage_row].spacing(spacing::MD))
+    container(column![title, gauge_centered, usage_row, percentage_row].spacing(spacing::MD))
         .padding(spacing::MD)
         .width(Length::Fill)
         .style(|_theme| container::Style {

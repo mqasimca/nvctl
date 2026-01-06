@@ -5,7 +5,9 @@
 use crate::message::Message;
 use crate::state::{AppState, GpuState};
 use crate::theme::{colors, font_size, spacing};
-use crate::widgets::{temp_graph, FanGauge, PowerBar, TempGauge};
+use crate::widgets::{
+    DataSeries, FanGauge, MultiSeriesGraph, PowerBar, TempGauge, UtilGauge, VramBar,
+};
 
 use iced::widget::{button, column, container, horizontal_space, row, scrollable, text, Canvas};
 use iced::{Alignment, Color, Element, Length, Theme};
@@ -329,8 +331,11 @@ fn view_gpu_dashboard<'a>(_state: &'a AppState, gpu: &'a GpuState) -> Element<'a
     // GPU info card
     let gpu_card = view_gpu_card(gpu);
 
-    // Metrics row with larger gauges
+    // Metrics row with 4 gauges
     let metrics = view_metrics_row(gpu);
+
+    // VRAM usage bar
+    let vram = view_vram_bar(gpu);
 
     // Quick stats with larger values
     let stats = view_quick_stats(gpu);
@@ -338,38 +343,95 @@ fn view_gpu_dashboard<'a>(_state: &'a AppState, gpu: &'a GpuState) -> Element<'a
     // Temperature history graph
     let history = view_temp_history(gpu);
 
-    column![gpu_card, metrics, stats, history]
+    column![gpu_card, metrics, vram, stats, history]
         .spacing(spacing::LG)
         .width(Length::Fill)
         .into()
 }
 
-/// Temperature history graph with glossy glass effect
-fn view_temp_history(gpu: &GpuState) -> Element<'_, Message> {
-    let graph = temp_graph(gpu.temp_history.data(), gpu.temperature.as_celsius());
-    let canvas: Element<'_, Message> = Canvas::new(graph)
+/// VRAM usage bar with glossy styling
+fn view_vram_bar(gpu: &GpuState) -> Element<'_, Message> {
+    let vram_widget = VramBar::new(gpu.memory_info);
+    let vram_canvas: Element<'_, Message> = Canvas::new(vram_widget)
         .width(Length::Fill)
-        .height(Length::Fixed(180.0))
+        .height(Length::Fixed(55.0))
         .into();
 
-    let temp_color = colors::temp_gradient(gpu.temperature.as_celsius());
+    let vram_color = if gpu.memory_info.usage_ratio() > 0.8 {
+        colors::ACCENT_RED
+    } else if gpu.memory_info.usage_ratio() > 0.5 {
+        colors::ACCENT_ORANGE
+    } else {
+        colors::ACCENT_CYAN
+    };
 
-    let title = text("Temperature History")
-        .size(font_size::SM)
-        .color(colors::with_alpha(temp_color, 0.8));
-
-    container(column![title, canvas].spacing(spacing::SM))
+    container(vram_canvas)
         .padding(spacing::MD)
         .width(Length::Fill)
         .style(move |_theme| container::Style {
             background: Some(colors::BG_SURFACE.into()),
             border: iced::Border {
-                color: colors::with_alpha(temp_color, 0.2),
+                color: colors::with_alpha(vram_color, 0.2),
                 width: 1.0,
                 radius: 16.0.into(),
             },
             shadow: iced::Shadow {
-                color: colors::with_alpha(temp_color, 0.05),
+                color: colors::with_alpha(vram_color, 0.05),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 16.0,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Performance history graph showing multiple metrics
+fn view_temp_history(gpu: &GpuState) -> Element<'_, Message> {
+    // Build multi-series graph with temperature, GPU utilization, and power
+    let temp_series = DataSeries::new(
+        gpu.temp_history.data(),
+        "Temp",
+        "°C",
+        colors::temp_color(gpu.temperature.as_celsius()),
+    )
+    .range(0.0, 100.0);
+
+    let util_series = DataSeries::new(
+        gpu.gpu_util_history.data(),
+        "GPU",
+        "%",
+        colors::ACCENT_PURPLE,
+    )
+    .range(0.0, 100.0);
+
+    // Normalize power to percentage of limit for better visualization
+    let power_max = gpu.power_limit.as_watts().max(1) as f32;
+    let power_series =
+        DataSeries::new(gpu.power_history.data(), "Power", "W", colors::ACCENT_ORANGE)
+            .range(0.0, power_max);
+
+    let graph = MultiSeriesGraph::new("Performance History")
+        .add_series(temp_series)
+        .add_series(util_series)
+        .add_series(power_series);
+
+    let canvas: Element<'_, Message> = Canvas::new(graph)
+        .width(Length::Fill)
+        .height(Length::Fixed(200.0))
+        .into();
+
+    container(canvas)
+        .padding(spacing::MD)
+        .width(Length::Fill)
+        .style(|_theme| container::Style {
+            background: Some(colors::BG_SURFACE.into()),
+            border: iced::Border {
+                color: colors::with_alpha(colors::ACCENT_CYAN, 0.2),
+                width: 1.0,
+                radius: 16.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: colors::with_alpha(colors::ACCENT_CYAN, 0.05),
                 offset: iced::Vector::new(0.0, 4.0),
                 blur_radius: 16.0,
             },
@@ -402,7 +464,28 @@ fn view_gpu_card(gpu: &GpuState) -> Element<'_, Message> {
 
     let info_col = column![name, driver, fan_count].spacing(spacing::XS);
 
-    container(info_col)
+    // Clock speeds display
+    let gpu_clock = text(format!("GPU: {} MHz", gpu.gpu_clock.as_mhz()))
+        .size(font_size::SM)
+        .color(colors::ACCENT_PURPLE);
+
+    let mem_clock = text(format!("MEM: {} MHz", gpu.mem_clock.as_mhz()))
+        .size(font_size::SM)
+        .color(colors::ACCENT_BLUE);
+
+    let perf_state = text(format!("{}", gpu.perf_state))
+        .size(font_size::SM)
+        .color(colors::ACCENT_GREEN);
+
+    let clock_col = column![gpu_clock, mem_clock, perf_state]
+        .spacing(spacing::XS)
+        .align_x(Alignment::End);
+
+    let content_row = row![info_col, horizontal_space(), clock_col]
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    container(content_row)
         .padding(spacing::LG)
         .width(Length::Fill)
         .style(|_theme| container::Style {
@@ -422,37 +505,46 @@ fn view_gpu_card(gpu: &GpuState) -> Element<'_, Message> {
         .into()
 }
 
-/// Row of metric gauges - LARGER for more impact
+/// Row of metric gauges - 4 gauges for comprehensive monitoring
 fn view_metrics_row(gpu: &GpuState) -> Element<'_, Message> {
-    // Temperature gauge - LARGER
+    // Temperature gauge
     let temp_widget = TempGauge::new(gpu.temperature, gpu.thresholds);
     let temp_canvas: Element<'_, Message> = Canvas::new(temp_widget)
-        .width(Length::Fixed(160.0))
-        .height(Length::Fixed(160.0))
+        .width(Length::Fixed(140.0))
+        .height(Length::Fixed(140.0))
         .into();
     let temp_color = colors::temp_color(gpu.temperature.as_celsius());
     let temp_gauge = view_metric_card("TEMPERATURE", temp_canvas, temp_color);
 
-    // Fan speed gauge - LARGER
+    // Fan speed gauge
     let fan_speed = gpu.average_fan_speed().unwrap_or(0);
     let fan_widget = FanGauge::new(fan_speed);
     let fan_canvas: Element<'_, Message> = Canvas::new(fan_widget)
-        .width(Length::Fixed(160.0))
-        .height(Length::Fixed(160.0))
+        .width(Length::Fixed(140.0))
+        .height(Length::Fixed(140.0))
         .into();
     let fan_color = colors::fan_color(fan_speed);
     let fan_gauge = view_metric_card("FAN SPEED", fan_canvas, fan_color);
 
-    // Power bar - LARGER
+    // Power gauge
     let power_widget = PowerBar::new(gpu.power_usage, gpu.power_limit, gpu.power_constraints);
     let power_canvas: Element<'_, Message> = Canvas::new(power_widget)
-        .width(Length::Fixed(160.0))
-        .height(Length::Fixed(160.0))
+        .width(Length::Fixed(140.0))
+        .height(Length::Fixed(140.0))
         .into();
     let power_color = colors::power_color(gpu.power_ratio());
-    let power_bar = view_metric_card("POWER", power_canvas, power_color);
+    let power_gauge = view_metric_card("POWER", power_canvas, power_color);
 
-    row![temp_gauge, fan_gauge, power_bar]
+    // GPU Utilization gauge
+    let util_widget = UtilGauge::new(gpu.utilization);
+    let util_canvas: Element<'_, Message> = Canvas::new(util_widget)
+        .width(Length::Fixed(140.0))
+        .height(Length::Fixed(140.0))
+        .into();
+    let util_color = colors::ACCENT_PURPLE;
+    let util_gauge = view_metric_card("GPU USAGE", util_canvas, util_color);
+
+    row![temp_gauge, fan_gauge, power_gauge, util_gauge]
         .spacing(spacing::MD)
         .width(Length::Fill)
         .into()
@@ -526,10 +618,29 @@ fn view_quick_stats(gpu: &GpuState) -> Element<'_, Message> {
         view_stat("Fan Policy", "Auto", colors::ACCENT_GREEN)
     };
 
+    let util_stat = view_stat(
+        "GPU Load",
+        &format!("{}%", gpu.utilization.gpu_percent()),
+        colors::ACCENT_PURPLE,
+    );
+
+    let mem_util_stat = view_stat(
+        "Mem Bandwidth",
+        &format!("{}%", gpu.utilization.memory_percent()),
+        colors::ACCENT_BLUE,
+    );
+
     container(
-        row![temp_stat, fan_stat, power_stat, policy_stat]
-            .spacing(spacing::XL)
-            .width(Length::Fill),
+        row![
+            temp_stat,
+            fan_stat,
+            power_stat,
+            policy_stat,
+            util_stat,
+            mem_util_stat
+        ]
+        .spacing(spacing::LG)
+        .width(Length::Fill),
     )
     .padding(spacing::LG)
     .width(Length::Fill)

@@ -7,8 +7,8 @@
 use crate::message::{GpuStateSnapshot, View};
 use crate::services::Profile;
 use nvctl::domain::{
-    FanCurve, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit, Temperature,
-    ThermalThresholds,
+    ClockSpeed, FanCurve, FanPolicy, FanSpeed, GpuInfo, MemoryInfo, PerformanceState,
+    PowerConstraints, PowerLimit, Temperature, ThermalThresholds, Utilization,
 };
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -257,6 +257,24 @@ pub struct GpuState {
     /// Power usage history
     pub power_history: MetricsHistory,
 
+    /// Graphics clock speed
+    pub gpu_clock: ClockSpeed,
+
+    /// Memory clock speed
+    pub mem_clock: ClockSpeed,
+
+    /// GPU and memory utilization
+    pub utilization: Utilization,
+
+    /// GPU utilization history
+    pub gpu_util_history: MetricsHistory,
+
+    /// VRAM info (total, used, free)
+    pub memory_info: MemoryInfo,
+
+    /// Performance state (P-state)
+    pub perf_state: PerformanceState,
+
     /// Last update timestamp
     pub last_update: Instant,
 }
@@ -277,6 +295,12 @@ impl GpuState {
             power_limit: PowerLimit::from_watts(0),
             power_constraints: None,
             power_history: MetricsHistory::new(),
+            gpu_clock: ClockSpeed::default(),
+            mem_clock: ClockSpeed::default(),
+            utilization: Utilization::default(),
+            gpu_util_history: MetricsHistory::new(),
+            memory_info: MemoryInfo::default(),
+            perf_state: PerformanceState::default(),
             last_update: Instant::now(),
         }
     }
@@ -288,6 +312,11 @@ impl GpuState {
         self.fan_policies = snapshot.fan_policies;
         self.power_usage = snapshot.power_usage;
         self.power_limit = snapshot.power_limit;
+        self.gpu_clock = snapshot.gpu_clock;
+        self.mem_clock = snapshot.mem_clock;
+        self.utilization = snapshot.utilization;
+        self.memory_info = snapshot.memory_info;
+        self.perf_state = snapshot.perf_state;
         self.last_update = snapshot.timestamp;
 
         // Add to history
@@ -295,6 +324,8 @@ impl GpuState {
             .push(snapshot.temperature.as_celsius() as f32);
         self.power_history
             .push(snapshot.power_usage.as_watts() as f32);
+        self.gpu_util_history
+            .push(snapshot.utilization.gpu_percent() as f32);
     }
 
     /// Get average fan speed across all fans

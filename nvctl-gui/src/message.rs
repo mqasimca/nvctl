@@ -4,7 +4,10 @@
 
 #![allow(dead_code)]
 
-use nvctl::domain::{FanCurve, FanPolicy, FanSpeed, PowerLimit, Temperature};
+use nvctl::domain::{
+    ClockSpeed, FanCurve, FanPolicy, FanSpeed, MemoryInfo, PerformanceState, PowerLimit,
+    Temperature, Utilization,
+};
 use std::time::Instant;
 
 /// Top-level application messages
@@ -128,6 +131,16 @@ pub struct GpuStateSnapshot {
     pub power_usage: PowerLimit,
     /// Current power limit
     pub power_limit: PowerLimit,
+    /// Graphics clock speed
+    pub gpu_clock: ClockSpeed,
+    /// Memory clock speed
+    pub mem_clock: ClockSpeed,
+    /// GPU and memory utilization
+    pub utilization: Utilization,
+    /// VRAM info (total, used, free)
+    pub memory_info: MemoryInfo,
+    /// Performance state (P-state)
+    pub perf_state: PerformanceState,
     /// Timestamp
     pub timestamp: Instant,
 }

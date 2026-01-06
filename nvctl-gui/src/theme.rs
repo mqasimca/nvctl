@@ -132,7 +132,11 @@ pub mod colors {
     /// Sky blue - Additional colorful accent (#00aaff)
     pub const ACCENT_SKY: Color = Color::from_rgb(0.0, 0.667, 1.0);
 
+    /// Electric Blue - Deep vibrant blue (#0088ff)
+    pub const ACCENT_BLUE: Color = Color::from_rgb(0.0, 0.533, 1.0);
+
     /// Gold accent - Premium feel (#ffd700)
+    #[allow(dead_code)]
     pub const ACCENT_GOLD: Color = Color::from_rgb(1.0, 0.843, 0.0);
 
     // ═══════════════════════════════════════════════════════════════════════════

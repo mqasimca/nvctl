@@ -7,7 +7,10 @@
 use crate::message::GpuStateSnapshot;
 use crate::state::GpuState;
 
-use nvctl::domain::{CoolerTarget, FanPolicy, FanSpeed, PowerLimit, Temperature};
+use nvctl::domain::{
+    ClockSpeed, ClockType, CoolerTarget, FanPolicy, FanSpeed, MemoryInfo, PerformanceState,
+    PowerLimit, Temperature, Utilization,
+};
 use nvctl::error::NvmlError;
 use nvctl::nvml::traits::{GpuDevice, GpuManager};
 use nvctl::nvml::wrapper::NvmlManager;
@@ -100,6 +103,25 @@ impl GpuMonitor {
         let power_usage = device.power_usage().unwrap_or(PowerLimit::from_watts(0));
         let power_limit = device.power_limit().unwrap_or(PowerLimit::from_watts(0));
 
+        // Get clock speeds
+        let gpu_clock = device
+            .clock_speed(ClockType::Graphics)
+            .unwrap_or(ClockSpeed::default());
+        let mem_clock = device
+            .clock_speed(ClockType::Memory)
+            .unwrap_or(ClockSpeed::default());
+
+        // Get utilization
+        let utilization = device.utilization().unwrap_or(Utilization::default());
+
+        // Get memory info
+        let memory_info = device.memory_info().unwrap_or(MemoryInfo::default());
+
+        // Get performance state
+        let perf_state = device
+            .performance_state()
+            .unwrap_or(PerformanceState::default());
+
         let mut fan_speeds = Vec::new();
         let mut fan_policies = Vec::new();
 
@@ -122,6 +144,11 @@ impl GpuMonitor {
             fan_policies,
             power_usage,
             power_limit,
+            gpu_clock,
+            mem_clock,
+            utilization,
+            memory_info,
+            perf_state,
             timestamp: Instant::now(),
         })
     }

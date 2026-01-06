@@ -3,8 +3,9 @@
 //! These traits abstract over NVML to enable testing with mocks.
 
 use crate::domain::{
-    AcousticLimits, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit,
-    Temperature, ThermalThresholds,
+    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, MemoryInfo,
+    PerformanceState, PowerConstraints, PowerLimit, Temperature, ThermalThresholds,
+    ThrottleReasons, Utilization,
 };
 use crate::error::NvmlError;
 
@@ -75,6 +76,22 @@ pub trait GpuDevice: Send + Sync {
 
     /// Get current power usage
     fn power_usage(&self) -> Result<PowerLimit, NvmlError>;
+
+    // Performance monitoring operations
+    /// Get current clock speed for a specific clock type
+    fn clock_speed(&self, clock_type: ClockType) -> Result<ClockSpeed, NvmlError>;
+
+    /// Get GPU and memory utilization rates
+    fn utilization(&self) -> Result<Utilization, NvmlError>;
+
+    /// Get memory (VRAM) information
+    fn memory_info(&self) -> Result<MemoryInfo, NvmlError>;
+
+    /// Get current performance state (P-state)
+    fn performance_state(&self) -> Result<PerformanceState, NvmlError>;
+
+    /// Get current clock throttle reasons
+    fn throttle_reasons(&self) -> Result<ThrottleReasons, NvmlError>;
 }
 
 /// Trait for managing multiple GPUs

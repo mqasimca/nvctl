@@ -3,8 +3,9 @@
 //! Provides mock GPU device and manager for unit testing without real hardware.
 
 use crate::domain::{
-    AcousticLimits, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit,
-    Temperature, ThermalThresholds,
+    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, MemoryInfo,
+    PerformanceState, PowerConstraints, PowerLimit, Temperature, ThermalThresholds,
+    ThrottleReasons, Utilization,
 };
 use crate::error::NvmlError;
 use crate::nvml::{GpuDevice, GpuManager};
@@ -222,6 +223,40 @@ impl GpuDevice for MockDevice {
 
     fn power_usage(&self) -> Result<PowerLimit, NvmlError> {
         Ok(self.power_usage)
+    }
+
+    fn clock_speed(&self, clock_type: ClockType) -> Result<ClockSpeed, NvmlError> {
+        // Return mock clock speeds
+        let mhz = match clock_type {
+            ClockType::Graphics | ClockType::SM => 1500,
+            ClockType::Memory => 10000,
+            ClockType::Video => 1200,
+        };
+        Ok(ClockSpeed::new(mhz))
+    }
+
+    fn utilization(&self) -> Result<Utilization, NvmlError> {
+        // Return mock utilization (30% GPU, 20% memory)
+        Ok(Utilization::new(30, 20))
+    }
+
+    fn memory_info(&self) -> Result<MemoryInfo, NvmlError> {
+        // Return mock memory info (8GB total, 2GB used)
+        Ok(MemoryInfo::new(
+            8 * 1024 * 1024 * 1024, // 8 GB total
+            2 * 1024 * 1024 * 1024, // 2 GB used
+            6 * 1024 * 1024 * 1024, // 6 GB free
+        ))
+    }
+
+    fn performance_state(&self) -> Result<PerformanceState, NvmlError> {
+        // Return P2 (balanced)
+        Ok(PerformanceState::P2)
+    }
+
+    fn throttle_reasons(&self) -> Result<ThrottleReasons, NvmlError> {
+        // Return no throttling
+        Ok(ThrottleReasons::default())
     }
 }
 

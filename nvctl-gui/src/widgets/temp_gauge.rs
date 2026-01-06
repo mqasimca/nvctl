@@ -214,7 +214,7 @@ impl canvas::Program<Message> for TempGauge {
         });
 
         // ═══════════════════════════════════════════════════════════════════════
-        // THRESHOLD MARKER - Clean indicator
+        // THRESHOLD MARKER - Clean indicator (white for visibility)
         // ═══════════════════════════════════════════════════════════════════════
         if let Some(slowdown) = self.thresholds.slowdown {
             let slowdown_ratio = slowdown.as_celsius() as f32 / self.max_temp() as f32;
@@ -225,7 +225,7 @@ impl canvas::Program<Message> for TempGauge {
                     center,
                     radius,
                     marker_angle,
-                    colors::ACCENT_ORANGE,
+                    colors::TEXT_PRIMARY,
                 );
             }
         }

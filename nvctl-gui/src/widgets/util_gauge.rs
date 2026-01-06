@@ -1,6 +1,6 @@
-//! Power gauge widget
+//! GPU Utilization gauge widget
 //!
-//! Glossy circular arc gauge with vibrant colors showing power usage vs limit.
+//! Glossy circular arc gauge showing GPU utilization percentage.
 
 use crate::message::Message;
 use crate::theme::colors;
@@ -8,39 +8,26 @@ use crate::theme::colors;
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
 use iced::{mouse, Color, Point, Radians, Rectangle, Renderer, Theme, Vector};
-use nvctl::domain::{PowerConstraints, PowerLimit};
+use nvctl::domain::Utilization;
 
-/// Power gauge widget with glossy glass effect
-pub struct PowerBar {
-    usage: PowerLimit,
-    limit: PowerLimit,
-    constraints: Option<PowerConstraints>,
+/// GPU Utilization gauge widget with glossy glass effect
+pub struct UtilGauge {
+    utilization: Utilization,
 }
 
-impl PowerBar {
-    /// Create a new power gauge
-    pub fn new(
-        usage: PowerLimit,
-        limit: PowerLimit,
-        constraints: Option<PowerConstraints>,
-    ) -> Self {
-        Self {
-            usage,
-            limit,
-            constraints,
-        }
+impl UtilGauge {
+    /// Create a new utilization gauge
+    pub fn new(utilization: Utilization) -> Self {
+        Self { utilization }
     }
 
-    /// Get the power usage ratio
+    /// Get the GPU utilization ratio (0.0 - 1.0)
     fn ratio(&self) -> f32 {
-        if self.limit.as_watts() == 0 {
-            return 0.0;
-        }
-        (self.usage.as_watts() as f32 / self.limit.as_watts() as f32).clamp(0.0, 1.0)
+        self.utilization.gpu_percent() as f32 / 100.0
     }
 }
 
-impl canvas::Program<Message> for PowerBar {
+impl canvas::Program<Message> for UtilGauge {
     type State = ();
 
     fn draw(
@@ -59,12 +46,12 @@ impl canvas::Program<Message> for PowerBar {
         let start_angle = 135.0_f32.to_radians();
         let sweep = 270.0_f32.to_radians();
 
-        // Calculate power ratio and angle
-        let power_ratio = self.ratio();
-        let value_angle = start_angle + sweep * power_ratio;
+        // Calculate utilization ratio and angle
+        let util_ratio = self.ratio();
+        let value_angle = start_angle + sweep * util_ratio;
 
-        // Get gradient color based on power ratio (green -> orange -> red)
-        let main_color = colors::lerp(colors::ACCENT_GREEN, colors::ACCENT_RED, power_ratio);
+        // Get gradient color based on utilization (blue -> purple -> magenta)
+        let main_color = util_gradient(util_ratio);
         let bright_color = colors::glossy_highlight(main_color);
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -123,7 +110,7 @@ impl canvas::Program<Message> for PowerBar {
         // ═══════════════════════════════════════════════════════════════════════
         // VALUE ARC - Colorful glossy fill with gradient
         // ═══════════════════════════════════════════════════════════════════════
-        if power_ratio > 0.0 {
+        if util_ratio > 0.0 {
             // Outer soft glow
             draw_arc(
                 &mut frame,
@@ -172,7 +159,7 @@ impl canvas::Program<Message> for PowerBar {
         // ═══════════════════════════════════════════════════════════════════════
         // END CAP - Glossy glowing orb
         // ═══════════════════════════════════════════════════════════════════════
-        if power_ratio > 0.01 {
+        if util_ratio > 0.01 {
             let end_x = center.x + radius * value_angle.cos();
             let end_y = center.y + radius * value_angle.sin();
 
@@ -194,32 +181,11 @@ impl canvas::Program<Message> for PowerBar {
         }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // DEFAULT POWER LIMIT MARKER - White indicator on track
+        // UTILIZATION TEXT - Clean, bold centered
         // ═══════════════════════════════════════════════════════════════════════
-        if let Some(ref constraints) = self.constraints {
-            if constraints.max.as_watts() > 0 && self.limit.as_watts() > 0 {
-                let default_ratio =
-                    constraints.default.as_watts() as f32 / constraints.max.as_watts() as f32;
-                let marker_angle = start_angle + sweep * default_ratio;
-
-                let marker_x = center.x + radius * marker_angle.cos();
-                let marker_y = center.y + radius * marker_angle.sin();
-
-                // White marker dot
-                let marker_glow = Path::circle(Point::new(marker_x, marker_y), 8.0);
-                frame.fill(&marker_glow, colors::with_alpha(colors::TEXT_PRIMARY, 0.3));
-
-                let marker_dot = Path::circle(Point::new(marker_x, marker_y), 4.0);
-                frame.fill(&marker_dot, colors::TEXT_PRIMARY);
-            }
-        }
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // POWER TEXT - Clean, bold centered
-        // ═══════════════════════════════════════════════════════════════════════
-        let power_text = format!("{}W", self.usage.as_watts());
+        let util_text = format!("{}%", self.utilization.gpu_percent());
         frame.fill_text(Text {
-            content: power_text,
+            content: util_text,
             position: center + Vector::new(0.0, -4.0),
             color: colors::TEXT_PRIMARY,
             size: 32.0.into(),
@@ -228,9 +194,9 @@ impl canvas::Program<Message> for PowerBar {
             ..Text::default()
         });
 
-        // Unit label in accent color
+        // Label in accent color
         frame.fill_text(Text {
-            content: "POWER".to_string(),
+            content: "GPU".to_string(),
             position: center + Vector::new(0.0, 20.0),
             color: colors::with_alpha(main_color, 0.8),
             size: 11.0.into(),
@@ -240,6 +206,20 @@ impl canvas::Program<Message> for PowerBar {
         });
 
         vec![frame.into_geometry()]
+    }
+}
+
+/// Get color gradient for utilization (blue -> purple -> magenta)
+fn util_gradient(ratio: f32) -> Color {
+    // Blue at low, purple at mid, magenta at high
+    if ratio < 0.5 {
+        // Blue to purple
+        let t = ratio * 2.0;
+        colors::lerp(colors::ACCENT_BLUE, colors::ACCENT_PURPLE, t)
+    } else {
+        // Purple to magenta
+        let t = (ratio - 0.5) * 2.0;
+        colors::lerp(colors::ACCENT_PURPLE, colors::ACCENT_MAGENTA, t)
     }
 }
 
@@ -276,18 +256,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_power_gauge_ratio() {
-        let gauge = PowerBar::new(
-            PowerLimit::from_watts(150),
-            PowerLimit::from_watts(300),
-            None,
-        );
-        assert!((gauge.ratio() - 0.5).abs() < 0.001);
+    fn test_util_gauge_ratio() {
+        let gauge = UtilGauge::new(Utilization::new(75, 50));
+        assert!((gauge.ratio() - 0.75).abs() < 0.001);
     }
 
     #[test]
-    fn test_power_gauge_zero_limit() {
-        let gauge = PowerBar::new(PowerLimit::from_watts(100), PowerLimit::from_watts(0), None);
+    fn test_util_gauge_zero() {
+        let gauge = UtilGauge::new(Utilization::new(0, 0));
         assert_eq!(gauge.ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_util_gradient() {
+        let low = util_gradient(0.0);
+        let high = util_gradient(1.0);
+        // Should be different colors
+        assert!(low.r != high.r || low.g != high.g || low.b != high.b);
     }
 }

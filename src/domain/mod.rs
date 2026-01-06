@@ -5,10 +5,14 @@
 
 pub mod fan;
 pub mod gpu;
+pub mod performance;
 pub mod power;
 pub mod thermal;
 
 pub use fan::{CoolerTarget, FanCurve, FanCurvePoint, FanInfo, FanPolicy, FanSpeed};
 pub use gpu::GpuInfo;
+pub use performance::{
+    ClockSpeed, ClockType, MemoryInfo, PerformanceState, ThrottleReasons, Utilization,
+};
 pub use power::{PowerConstraints, PowerLimit};
 pub use thermal::{AcousticLimits, Temperature, ThermalThresholds};

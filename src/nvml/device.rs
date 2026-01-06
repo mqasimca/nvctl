@@ -3,8 +3,9 @@
 //! Real implementation of GpuDevice trait using nvml-wrapper.
 
 use crate::domain::{
-    AcousticLimits, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, PowerConstraints, PowerLimit,
-    Temperature, ThermalThresholds,
+    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, MemoryInfo,
+    PerformanceState, PowerConstraints, PowerLimit, Temperature, ThermalThresholds,
+    ThrottleReasons, Utilization,
 };
 use crate::error::NvmlError;
 use crate::nvml::traits::GpuDevice;
@@ -228,6 +229,75 @@ impl GpuDevice for NvmlDevice<'_> {
     fn power_usage(&self) -> Result<PowerLimit, NvmlError> {
         let usage_mw = self.device.power_usage().map_err(Self::convert_error)?;
         Ok(PowerLimit::from_milliwatts(usage_mw))
+    }
+
+    fn clock_speed(&self, clock_type: ClockType) -> Result<ClockSpeed, NvmlError> {
+        use nvml_wrapper::enum_wrappers::device::Clock;
+
+        let nvml_clock = match clock_type {
+            ClockType::Graphics => Clock::Graphics,
+            ClockType::SM => Clock::SM,
+            ClockType::Memory => Clock::Memory,
+            ClockType::Video => Clock::Video,
+        };
+
+        let speed = self
+            .device
+            .clock_info(nvml_clock)
+            .map_err(Self::convert_error)?;
+
+        Ok(ClockSpeed::new(speed))
+    }
+
+    fn utilization(&self) -> Result<Utilization, NvmlError> {
+        let util = self
+            .device
+            .utilization_rates()
+            .map_err(Self::convert_error)?;
+
+        Ok(Utilization::new(util.gpu as u8, util.memory as u8))
+    }
+
+    fn memory_info(&self) -> Result<MemoryInfo, NvmlError> {
+        let mem = self.device.memory_info().map_err(Self::convert_error)?;
+
+        Ok(MemoryInfo::new(mem.total, mem.used, mem.free))
+    }
+
+    fn performance_state(&self) -> Result<PerformanceState, NvmlError> {
+        let state = self
+            .device
+            .performance_state()
+            .map_err(Self::convert_error)?;
+
+        // nvml-wrapper returns PerformanceState enum, convert to our type
+        Ok(PerformanceState::from_raw(state as u32))
+    }
+
+    fn throttle_reasons(&self) -> Result<ThrottleReasons, NvmlError> {
+        let reasons = self
+            .device
+            .current_throttle_reasons()
+            .map_err(Self::convert_error)?;
+
+        // nvml-wrapper returns ThrottleReasons bitflags
+        Ok(ThrottleReasons {
+            idle: reasons.contains(nvml_wrapper::bitmasks::device::ThrottleReasons::GPU_IDLE),
+            sw_power_cap: reasons
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::SW_POWER_CAP),
+            hw_slowdown: reasons
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::HW_SLOWDOWN),
+            sync_boost: reasons
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::SYNC_BOOST),
+            sw_thermal: reasons
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::SW_THERMAL_SLOWDOWN),
+            hw_thermal: reasons
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::HW_THERMAL_SLOWDOWN),
+            hw_power_brake: reasons
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::HW_POWER_BRAKE_SLOWDOWN),
+            display_clocks: reasons
+                .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::DISPLAY_CLOCK_SETTING),
+        })
     }
 }
 
