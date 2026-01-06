@@ -73,7 +73,38 @@ sudo nvctl power limit 250
 nvctl --dry-run fan speed 100
 ```
 
-## Usage
+## GUI Application
+
+Launch the graphical interface for visual GPU control:
+
+```bash
+# Run GUI (release mode for smooth animations)
+make gui
+
+# Or directly
+nvctl-gui
+```
+
+### GUI Features
+
+- **Dashboard** - Real-time gauges for temperature, fan speed, and power with colorful gradients
+- **Fan Control** - Interactive fan curve editor with drag-and-drop points
+- **Power Control** - Slider-based power limit adjustment with constraints display
+- **Thermal Control** - Temperature threshold configuration
+- **Profiles** - Save/load/delete configuration profiles
+- **Settings** - Refresh rate, theme preferences, and startup options
+
+### GUI Make Commands
+
+```bash
+make gui          # Run GUI (release mode)
+make gui-dev      # Run GUI (debug mode)
+make gui-check    # Check GUI code (fmt + clippy)
+make gui-test     # Run GUI tests
+make gui-build    # Build GUI release binary
+```
+
+## CLI Usage
 
 ### Listing GPUs
 
@@ -365,7 +396,12 @@ lsmod | grep nvidia
 
 ```
 CLI (clap) → Commands → Services → NVML Abstraction → Hardware
+GUI (iced) → App State → Services → NVML Abstraction → Hardware
+```
 
+### CLI Structure (nvctl)
+
+```
 src/
 ├── main.rs           # Entry point
 ├── lib.rs            # Library exports
@@ -382,6 +418,20 @@ src/
 │   └── wrapper.rs    # NVML initialization
 ├── config/           # TOML configuration system
 └── mock.rs           # Test mocks
+```
+
+### GUI Structure (nvctl-gui)
+
+```
+nvctl-gui/src/
+├── main.rs           # Entry point
+├── app.rs            # Iced application (state, update, view)
+├── message.rs        # Message types for Elm architecture
+├── state.rs          # Application state management
+├── theme.rs          # Glossy theme colors and styling
+├── views/            # Screen views (dashboard, fan, power, thermal, profiles)
+├── widgets/          # Custom canvas widgets (gauges, graphs, curve editor)
+└── services/         # GPU monitor, curve daemon, profiles, config
 ```
 
 ## Building
@@ -502,4 +552,5 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 - [nvml-wrapper](https://crates.io/crates/nvml-wrapper) - Rust bindings for NVML
 - [clap](https://crates.io/crates/clap) - CLI argument parsing
+- [iced](https://crates.io/crates/iced) - Cross-platform GUI framework for the GUI application
 - NVIDIA for the NVML library
