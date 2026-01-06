@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/pre-commit.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "agents": {
+    "preferred": [
+      "code-reviewer",
+      "type-design-analyzer"
+    ]
+  },
+  "rules": {
+    "gui": {
+      "framework": "iced",
+      "architecture": "elm",
+      "no_unwrap": true,
+      "require_cache": true
+    }
+  }
+}

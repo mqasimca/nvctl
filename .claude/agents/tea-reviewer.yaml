@@ -1,0 +1,9 @@
+name: tea-reviewer
+description: Review code for Elm Architecture compliance
+trigger: After creating or modifying screens/*.rs
+checks:
+  - state_uses_enum: "State should use enums for mutually exclusive states"
+  - messages_are_hierarchical: "Messages should be hierarchical"
+  - update_is_pure: "Update should not have side effects except state mutation"
+  - view_is_pure: "View should only read state, no mutations"
+  - no_layer_separation: "State/Update/View should NOT be in separate modules"

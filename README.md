@@ -7,6 +7,7 @@ A fast, safe NVIDIA GPU control tool written in Rust. Manage fan speeds, power l
 
 ## Features
 
+### CLI Tool
 - **Fan Control** - Manual speed control and automatic fan curves
 - **Power Management** - Set and monitor GPU power limits with constraint validation
 - **Thermal Monitoring** - Real-time temperature and threshold management
@@ -17,6 +18,15 @@ A fast, safe NVIDIA GPU control tool written in Rust. Manage fan speeds, power l
 - **Daemon Mode** - Continuous control loop with custom fan curves
 - **Configuration Files** - TOML-based persistent configuration
 
+### GUI Application (nvctl-gui)
+- **Glossy Glassmorphism Design** - Modern, vibrant interface with glass effects
+- **Real-time Monitoring** - Live temperature, fan speed, and power gauges
+- **Interactive Fan Curves** - Drag-and-drop curve editor with visual feedback
+- **Multi-GPU Dashboard** - Overview of all GPUs with link/unlink control
+- **Profile System** - Save and load configuration profiles
+- **Temperature History** - Visual graph of temperature over time
+- **Per-Fan Control** - Individual fan speed control with cooler target info
+
 ## Installation
 
 ### From Source
@@ -24,8 +34,14 @@ A fast, safe NVIDIA GPU control tool written in Rust. Manage fan speeds, power l
 ```bash
 git clone https://github.com/your-repo/nvctl.git
 cd nvctl
+
+# Build CLI tool
 cargo build --release
 sudo cp target/release/nvctl /usr/local/bin/
+
+# Build GUI (optional)
+cargo build --release --package nvctl-gui
+sudo cp target/release/nvctl-gui /usr/local/bin/
 ```
 
 ### Requirements

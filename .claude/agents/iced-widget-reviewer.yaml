@@ -1,0 +1,9 @@
+name: iced-widget-reviewer
+description: Review Iced canvas widgets for best practices
+trigger: After creating or modifying widgets/*.rs
+checks:
+  - uses_cache: "Verify canvas::Cache is used"
+  - cache_cleared: "Verify cache is cleared on data change only"
+  - no_side_effects: "View functions must be pure"
+  - proper_hit_testing: "Interactive widgets have hit testing"
+  - color_from_theme: "Colors use theme constants"
