@@ -1,0 +1,52 @@
+[package]
+name = "nvctl-gui"
+version = "0.1.0"
+edition = "2021"
+description = "GPU control GUI for nvctl using Iced"
+license = "MIT"
+
+[[bin]]
+name = "nvctl-gui"
+path = "src/main.rs"
+
+[dependencies]
+# GUI Framework
+iced = { version = "0.13", features = [
+    "canvas",
+    "svg",
+    "tokio",
+    "advanced",
+] }
+
+# Core library
+nvctl = { path = "../" }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+toml = "0.8"
+
+# System integration
+directories = "5"
+ksni = "0.2"
+
+# Utilities
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+chrono = "0.4"
+fs2 = "0.4"
+ctrlc = "3.4"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+nvctl = { path = "../", features = ["mock"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
