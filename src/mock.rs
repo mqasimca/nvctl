@@ -3,9 +3,11 @@
 //! Provides mock GPU device and manager for unit testing without real hardware.
 
 use crate::domain::{
-    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, MemoryInfo,
-    PerformanceState, PowerConstraints, PowerLimit, Temperature, ThermalThresholds,
-    ThrottleReasons, Utilization,
+    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, DecoderUtilization, EccErrors, EccMode,
+    EncoderUtilization, FanPolicy, FanSpeed, GpuInfo, MemoryInfo, PcieGeneration, PcieLinkStatus,
+    PcieLinkWidth, PcieMetrics, PcieReplayCounter, PcieThroughput, PerformanceState,
+    PowerConstraints, PowerLimit, ProcessList, Temperature, ThermalThresholds, ThrottleReasons,
+    Utilization,
 };
 use crate::error::NvmlError;
 use crate::nvml::{GpuDevice, GpuManager};
@@ -257,6 +259,54 @@ impl GpuDevice for MockDevice {
     fn throttle_reasons(&self) -> Result<ThrottleReasons, NvmlError> {
         // Return no throttling
         Ok(ThrottleReasons::default())
+    }
+
+    fn memory_temperature(&self) -> Result<Option<Temperature>, NvmlError> {
+        // Mock devices don't have separate memory temperature
+        Ok(None)
+    }
+
+    fn encoder_utilization(&self) -> Result<Option<EncoderUtilization>, NvmlError> {
+        // Return mock encoder utilization (25%)
+        Ok(Some(EncoderUtilization::new(25, 1000)))
+    }
+
+    fn decoder_utilization(&self) -> Result<Option<DecoderUtilization>, NvmlError> {
+        // Return mock decoder utilization (15%)
+        Ok(Some(DecoderUtilization::new(15, 1000)))
+    }
+
+    fn ecc_mode(&self) -> Result<Option<EccMode>, NvmlError> {
+        // Mock devices don't support ECC
+        Ok(None)
+    }
+
+    fn ecc_errors(&self) -> Result<Option<EccErrors>, NvmlError> {
+        // Mock devices don't support ECC
+        Ok(None)
+    }
+
+    fn pcie_metrics(&self) -> Result<PcieMetrics, NvmlError> {
+        // Return mock PCIe metrics (Gen4 x16)
+        let link_status = PcieLinkStatus::new(
+            PcieGeneration::Gen4,
+            PcieGeneration::Gen4,
+            PcieLinkWidth::X16,
+            PcieLinkWidth::X16,
+        );
+
+        // Mock throughput: 5 GB/s TX, 3 GB/s RX
+        let throughput = PcieThroughput::new(5_000_000_000, 3_000_000_000);
+
+        // No errors
+        let replay_counter = PcieReplayCounter::new(0);
+
+        Ok(PcieMetrics::new(link_status, throughput, replay_counter))
+    }
+
+    fn running_processes(&self) -> Result<ProcessList, NvmlError> {
+        // Return empty process list for mock device
+        Ok(ProcessList::default())
     }
 }
 

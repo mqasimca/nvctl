@@ -5,7 +5,7 @@
 use crate::domain::{FanCurve, PowerLimit};
 use crate::error::AppError;
 use crate::nvml::{GpuDevice, GpuManager};
-use crate::services::{FanService, PowerService};
+use crate::services::{AlertService, FanService, PowerService};
 
 use std::time::Duration;
 
@@ -47,6 +47,7 @@ pub struct Monitor {
     config: MonitorConfig,
     fan_service: FanService,
     power_service: PowerService,
+    alert_service: Option<AlertService>,
 }
 
 impl Monitor {
@@ -59,22 +60,34 @@ impl Monitor {
             config,
             fan_service,
             power_service,
+            alert_service: None,
         }
     }
 
+    /// Set the alert service for this monitor
+    pub fn with_alert_service(mut self, alert_service: AlertService) -> Self {
+        self.alert_service = Some(alert_service);
+        self
+    }
+
     /// Execute a single control tick on a device
-    pub fn tick<D: GpuDevice>(&self, device: &mut D) -> Result<(), AppError> {
+    pub fn tick<D: GpuDevice>(&mut self, device: &mut D, gpu_index: u32) -> Result<(), AppError> {
         // Apply fan curve
         self.fan_service.apply_curve(device)?;
 
         // Apply power limit if configured
         self.power_service.apply_limit(device)?;
 
+        // Evaluate alerts if configured
+        if let Some(alert_service) = &mut self.alert_service {
+            alert_service.evaluate(device, gpu_index)?;
+        }
+
         Ok(())
     }
 
     /// Run the control loop
-    pub fn run<M: GpuManager>(&self, manager: &M, gpu_indices: &[u32]) -> Result<(), AppError> {
+    pub fn run<M: GpuManager>(&mut self, manager: &M, gpu_indices: &[u32]) -> Result<(), AppError> {
         loop {
             match self.run_tick(manager, gpu_indices) {
                 Ok(()) => {}
@@ -100,10 +113,14 @@ impl Monitor {
         Ok(())
     }
 
-    fn run_tick<M: GpuManager>(&self, manager: &M, gpu_indices: &[u32]) -> Result<(), AppError> {
+    fn run_tick<M: GpuManager>(
+        &mut self,
+        manager: &M,
+        gpu_indices: &[u32],
+    ) -> Result<(), AppError> {
         for &idx in gpu_indices {
             let mut device = manager.device_by_index(idx)?;
-            self.tick(&mut device)?;
+            self.tick(&mut device, idx)?;
         }
         Ok(())
     }

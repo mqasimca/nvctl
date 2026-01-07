@@ -6,7 +6,8 @@ use crate::message::Message;
 use crate::state::{AppState, GpuState};
 use crate::theme::{colors, font_size, spacing};
 use crate::widgets::{
-    DataSeries, FanGauge, MultiSeriesGraph, PowerBar, TempGauge, UtilGauge, VramBar,
+    DataSeries, EccGauge, FanGauge, MemTempGauge, MultiSeriesGraph, PcieGauge, PowerBar, TempGauge,
+    UtilGauge, VideoGauge, VramBar,
 };
 
 use iced::widget::{button, column, container, horizontal_space, row, scrollable, text, Canvas};
@@ -406,9 +407,13 @@ fn view_temp_history(gpu: &GpuState) -> Element<'_, Message> {
 
     // Normalize power to percentage of limit for better visualization
     let power_max = gpu.power_limit.as_watts().max(1) as f32;
-    let power_series =
-        DataSeries::new(gpu.power_history.data(), "Power", "W", colors::ACCENT_ORANGE)
-            .range(0.0, power_max);
+    let power_series = DataSeries::new(
+        gpu.power_history.data(),
+        "Power",
+        "W",
+        colors::ACCENT_ORANGE,
+    )
+    .range(0.0, power_max);
 
     let graph = MultiSeriesGraph::new("Performance History")
         .add_series(temp_series)
@@ -505,13 +510,13 @@ fn view_gpu_card(gpu: &GpuState) -> Element<'_, Message> {
         .into()
 }
 
-/// Row of metric gauges - 4 gauges for comprehensive monitoring
+/// Row of metric gauges - Primary 4 gauges
 fn view_metrics_row(gpu: &GpuState) -> Element<'_, Message> {
     // Temperature gauge
     let temp_widget = TempGauge::new(gpu.temperature, gpu.thresholds);
     let temp_canvas: Element<'_, Message> = Canvas::new(temp_widget)
-        .width(Length::Fixed(140.0))
-        .height(Length::Fixed(140.0))
+        .width(Length::Fixed(160.0))
+        .height(Length::Fixed(160.0))
         .into();
     let temp_color = colors::temp_color(gpu.temperature.as_celsius());
     let temp_gauge = view_metric_card("TEMPERATURE", temp_canvas, temp_color);
@@ -520,8 +525,8 @@ fn view_metrics_row(gpu: &GpuState) -> Element<'_, Message> {
     let fan_speed = gpu.average_fan_speed().unwrap_or(0);
     let fan_widget = FanGauge::new(fan_speed);
     let fan_canvas: Element<'_, Message> = Canvas::new(fan_widget)
-        .width(Length::Fixed(140.0))
-        .height(Length::Fixed(140.0))
+        .width(Length::Fixed(160.0))
+        .height(Length::Fixed(160.0))
         .into();
     let fan_color = colors::fan_color(fan_speed);
     let fan_gauge = view_metric_card("FAN SPEED", fan_canvas, fan_color);
@@ -529,8 +534,8 @@ fn view_metrics_row(gpu: &GpuState) -> Element<'_, Message> {
     // Power gauge
     let power_widget = PowerBar::new(gpu.power_usage, gpu.power_limit, gpu.power_constraints);
     let power_canvas: Element<'_, Message> = Canvas::new(power_widget)
-        .width(Length::Fixed(140.0))
-        .height(Length::Fixed(140.0))
+        .width(Length::Fixed(160.0))
+        .height(Length::Fixed(160.0))
         .into();
     let power_color = colors::power_color(gpu.power_ratio());
     let power_gauge = view_metric_card("POWER", power_canvas, power_color);
@@ -538,14 +543,95 @@ fn view_metrics_row(gpu: &GpuState) -> Element<'_, Message> {
     // GPU Utilization gauge
     let util_widget = UtilGauge::new(gpu.utilization);
     let util_canvas: Element<'_, Message> = Canvas::new(util_widget)
-        .width(Length::Fixed(140.0))
-        .height(Length::Fixed(140.0))
+        .width(Length::Fixed(160.0))
+        .height(Length::Fixed(160.0))
         .into();
     let util_color = colors::ACCENT_PURPLE;
     let util_gauge = view_metric_card("GPU USAGE", util_canvas, util_color);
 
-    row![temp_gauge, fan_gauge, power_gauge, util_gauge]
-        .spacing(spacing::MD)
+    // Primary metrics row
+    let primary_row = row![temp_gauge, fan_gauge, power_gauge, util_gauge]
+        .spacing(spacing::LG)
+        .width(Length::Fill);
+
+    // Phase 1 metrics row
+    let phase1_row = view_phase1_metrics(gpu);
+
+    column![primary_row, phase1_row]
+        .spacing(spacing::XL)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Phase 1 metric gauges - Advanced monitoring
+fn view_phase1_metrics(gpu: &GpuState) -> Element<'_, Message> {
+    // Memory temperature gauge
+    let mem_temp_widget = MemTempGauge::new(gpu.memory_temperature);
+    let mem_temp_canvas: Element<'_, Message> = Canvas::new(mem_temp_widget)
+        .width(Length::Fixed(160.0))
+        .height(Length::Fixed(160.0))
+        .into();
+    let mem_temp_color = gpu
+        .memory_temperature
+        .map(|t| colors::temp_color(t.as_celsius()))
+        .unwrap_or(colors::TEXT_MUTED);
+    let mem_temp_gauge = view_metric_card("MEM TEMP", mem_temp_canvas, mem_temp_color);
+
+    // PCIe bandwidth gauge
+    let pcie_color = gpu
+        .pcie_metrics
+        .as_ref()
+        .map(|m| {
+            let eff = m.link_status.bandwidth_efficiency_percent();
+            if eff < 50.0 {
+                colors::ACCENT_ORANGE
+            } else {
+                colors::ACCENT_CYAN
+            }
+        })
+        .unwrap_or(colors::TEXT_MUTED);
+
+    let pcie_gauge = if let Some(metrics) = &gpu.pcie_metrics {
+        let pcie_widget = PcieGauge::new(*metrics);
+        let pcie_canvas: Element<'_, Message> = Canvas::new(pcie_widget)
+            .width(Length::Fixed(160.0))
+            .height(Length::Fixed(160.0))
+            .into();
+        view_metric_card("PCIe", pcie_canvas, pcie_color)
+    } else {
+        view_metric_card("PCIe", text("N/A").into(), colors::TEXT_MUTED)
+    };
+
+    // ECC health gauge
+    let ecc_widget = EccGauge::new(gpu.ecc_errors, 3600); // 1 hour uptime estimate
+    let ecc_canvas: Element<'_, Message> = Canvas::new(ecc_widget)
+        .width(Length::Fixed(160.0))
+        .height(Length::Fixed(160.0))
+        .into();
+    let ecc_color = if let Some(ecc) = &gpu.ecc_errors {
+        if ecc.has_uncorrectable() {
+            colors::ACCENT_RED
+        } else if ecc.correctable_exceeds_threshold(3600) {
+            colors::ACCENT_ORANGE
+        } else {
+            colors::ACCENT_GREEN
+        }
+    } else {
+        colors::TEXT_MUTED
+    };
+    let ecc_gauge = view_metric_card("ECC", ecc_canvas, ecc_color);
+
+    // Video codec gauge
+    let video_widget = VideoGauge::new(gpu.encoder_util, gpu.decoder_util);
+    let video_canvas: Element<'_, Message> = Canvas::new(video_widget)
+        .width(Length::Fixed(160.0))
+        .height(Length::Fixed(160.0))
+        .into();
+    let video_color = colors::ACCENT_PURPLE;
+    let video_gauge = view_metric_card("VIDEO", video_canvas, video_color);
+
+    row![mem_temp_gauge, pcie_gauge, ecc_gauge, video_gauge]
+        .spacing(spacing::LG)
         .width(Length::Fill)
         .into()
 }
@@ -556,28 +642,26 @@ fn view_metric_card<'a>(
     content: Element<'a, Message>,
     accent_color: Color,
 ) -> Element<'a, Message> {
-    let label_text = text(label)
-        .size(font_size::XS)
-        .color(colors::with_alpha(accent_color, 0.7));
+    let label_text = text(label).size(font_size::SM).color(accent_color);
 
     container(
         column![label_text, content]
-            .spacing(spacing::SM)
+            .spacing(spacing::MD)
             .align_x(Alignment::Center),
     )
-    .padding(spacing::LG)
+    .padding(spacing::XL)
     .width(Length::FillPortion(1))
     .style(move |_theme| container::Style {
         background: Some(colors::BG_SURFACE.into()),
         border: iced::Border {
-            color: colors::with_alpha(accent_color, 0.2),
-            width: 1.0,
+            color: colors::with_alpha(accent_color, 0.25),
+            width: 1.5,
             radius: 20.0.into(),
         },
         shadow: iced::Shadow {
-            color: colors::with_alpha(accent_color, 0.06),
-            offset: iced::Vector::new(0.0, 6.0),
-            blur_radius: 24.0,
+            color: colors::with_alpha(accent_color, 0.1),
+            offset: iced::Vector::new(0.0, 8.0),
+            blur_radius: 32.0,
         },
         ..Default::default()
     })
@@ -639,22 +723,22 @@ fn view_quick_stats(gpu: &GpuState) -> Element<'_, Message> {
             util_stat,
             mem_util_stat
         ]
-        .spacing(spacing::LG)
+        .spacing(spacing::XL)
         .width(Length::Fill),
     )
-    .padding(spacing::LG)
+    .padding(spacing::XL)
     .width(Length::Fill)
     .style(|_theme| container::Style {
         background: Some(colors::BG_SURFACE.into()),
         border: iced::Border {
             color: colors::GLASS_BORDER,
-            width: 1.0,
-            radius: 16.0.into(),
+            width: 1.5,
+            radius: 20.0.into(),
         },
         shadow: iced::Shadow {
-            color: colors::with_alpha(colors::ACCENT_CYAN, 0.04),
-            offset: iced::Vector::new(0.0, 4.0),
-            blur_radius: 12.0,
+            color: colors::with_alpha(colors::ACCENT_CYAN, 0.08),
+            offset: iced::Vector::new(0.0, 8.0),
+            blur_radius: 24.0,
         },
         ..Default::default()
     })
@@ -663,12 +747,14 @@ fn view_quick_stats(gpu: &GpuState) -> Element<'_, Message> {
 
 /// Single stat display with larger typography
 fn view_stat<'a>(label: &'static str, value: &str, color: Color) -> Element<'a, Message> {
-    let label_text = text(label).size(font_size::SM).color(colors::TEXT_MUTED);
+    let label_text = text(label)
+        .size(font_size::BASE)
+        .color(colors::TEXT_SECONDARY);
 
-    let value_text = text(value.to_string()).size(font_size::XL).color(color);
+    let value_text = text(value.to_string()).size(font_size::XXL).color(color);
 
     column![label_text, value_text]
-        .spacing(spacing::XS)
+        .spacing(spacing::SM)
         .width(Length::FillPortion(1))
         .into()
 }

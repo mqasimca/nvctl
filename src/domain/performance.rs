@@ -73,6 +73,54 @@ impl Utilization {
     }
 }
 
+/// Video encoder utilization
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct EncoderUtilization {
+    /// Encoder utilization (0-100%)
+    pub utilization: u8,
+    /// Sampling period in microseconds
+    pub sampling_period_us: u32,
+}
+
+impl EncoderUtilization {
+    /// Create new encoder utilization
+    pub fn new(utilization: u8, sampling_period_us: u32) -> Self {
+        Self {
+            utilization: utilization.min(100),
+            sampling_period_us,
+        }
+    }
+
+    /// Get utilization as percentage
+    pub fn percent(&self) -> u8 {
+        self.utilization
+    }
+}
+
+/// Video decoder utilization
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DecoderUtilization {
+    /// Decoder utilization (0-100%)
+    pub utilization: u8,
+    /// Sampling period in microseconds
+    pub sampling_period_us: u32,
+}
+
+impl DecoderUtilization {
+    /// Create new decoder utilization
+    pub fn new(utilization: u8, sampling_period_us: u32) -> Self {
+        Self {
+            utilization: utilization.min(100),
+            sampling_period_us,
+        }
+    }
+
+    /// Get utilization as percentage
+    pub fn percent(&self) -> u8 {
+        self.utilization
+    }
+}
+
 /// VRAM/Memory information
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MemoryInfo {
@@ -351,5 +399,27 @@ mod tests {
         reasons.hw_thermal = true;
         assert!(reasons.is_throttling());
         assert_eq!(reasons.active_reasons(), vec!["HW Thermal"]);
+    }
+
+    #[test]
+    fn test_encoder_utilization() {
+        let encoder = EncoderUtilization::new(75, 1000);
+        assert_eq!(encoder.percent(), 75);
+        assert_eq!(encoder.sampling_period_us, 1000);
+
+        // Test clamping
+        let clamped = EncoderUtilization::new(150, 1000);
+        assert_eq!(clamped.percent(), 100);
+    }
+
+    #[test]
+    fn test_decoder_utilization() {
+        let decoder = DecoderUtilization::new(50, 2000);
+        assert_eq!(decoder.percent(), 50);
+        assert_eq!(decoder.sampling_period_us, 2000);
+
+        // Test clamping
+        let clamped = DecoderUtilization::new(200, 2000);
+        assert_eq!(clamped.percent(), 100);
     }
 }

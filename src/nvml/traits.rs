@@ -3,8 +3,9 @@
 //! These traits abstract over NVML to enable testing with mocks.
 
 use crate::domain::{
-    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, MemoryInfo,
-    PerformanceState, PowerConstraints, PowerLimit, Temperature, ThermalThresholds,
+    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, DecoderUtilization, EccErrors, EccMode,
+    EncoderUtilization, FanPolicy, FanSpeed, GpuInfo, MemoryInfo, PcieMetrics, PerformanceState,
+    PowerConstraints, PowerLimit, ProcessList, Temperature, TemperatureReading, ThermalThresholds,
     ThrottleReasons, Utilization,
 };
 use crate::error::NvmlError;
@@ -29,6 +30,27 @@ pub trait GpuDevice: Send + Sync {
     // Temperature operations
     /// Get current GPU temperature
     fn temperature(&self) -> Result<Temperature, NvmlError>;
+
+    /// Get memory temperature (if available)
+    ///
+    /// Returns `Ok(None)` if the GPU doesn't have a separate memory temperature sensor.
+    /// GDDR6X GPUs typically have memory temperature sensors.
+    fn memory_temperature(&self) -> Result<Option<Temperature>, NvmlError>;
+
+    /// Get all temperature readings (GPU and memory)
+    fn temperature_readings(&self) -> Result<Vec<TemperatureReading>, NvmlError> {
+        let mut readings = vec![];
+
+        if let Ok(temp) = self.temperature() {
+            readings.push(TemperatureReading::gpu(temp));
+        }
+
+        if let Ok(Some(mem_temp)) = self.memory_temperature() {
+            readings.push(TemperatureReading::memory(mem_temp));
+        }
+
+        Ok(readings)
+    }
 
     /// Get thermal thresholds
     fn thermal_thresholds(&self) -> Result<ThermalThresholds, NvmlError>;
@@ -84,6 +106,16 @@ pub trait GpuDevice: Send + Sync {
     /// Get GPU and memory utilization rates
     fn utilization(&self) -> Result<Utilization, NvmlError>;
 
+    /// Get encoder utilization
+    ///
+    /// Returns `Ok(None)` if encoder utilization is not available or not supported.
+    fn encoder_utilization(&self) -> Result<Option<EncoderUtilization>, NvmlError>;
+
+    /// Get decoder utilization
+    ///
+    /// Returns `Ok(None)` if decoder utilization is not available or not supported.
+    fn decoder_utilization(&self) -> Result<Option<DecoderUtilization>, NvmlError>;
+
     /// Get memory (VRAM) information
     fn memory_info(&self) -> Result<MemoryInfo, NvmlError>;
 
@@ -92,6 +124,29 @@ pub trait GpuDevice: Send + Sync {
 
     /// Get current clock throttle reasons
     fn throttle_reasons(&self) -> Result<ThrottleReasons, NvmlError>;
+
+    // ECC memory error tracking
+    /// Get ECC mode configuration
+    ///
+    /// Returns `Ok(None)` if the GPU doesn't support ECC memory.
+    fn ecc_mode(&self) -> Result<Option<EccMode>, NvmlError>;
+
+    /// Get ECC memory error counts
+    ///
+    /// Returns `Ok(None)` if the GPU doesn't support ECC memory.
+    /// Otherwise returns error counts for correctable and uncorrectable errors,
+    /// both for current boot and GPU lifetime.
+    fn ecc_errors(&self) -> Result<Option<EccErrors>, NvmlError>;
+
+    // PCIe monitoring
+    /// Get PCIe link and throughput metrics
+    ///
+    /// Returns PCIe generation, link width, throughput, and error counters.
+    fn pcie_metrics(&self) -> Result<PcieMetrics, NvmlError>;
+
+    // Process monitoring operations
+    /// Get list of processes running on this GPU
+    fn running_processes(&self) -> Result<ProcessList, NvmlError>;
 }
 
 /// Trait for managing multiple GPUs

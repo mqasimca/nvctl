@@ -275,6 +275,24 @@ pub struct GpuState {
     /// Performance state (P-state)
     pub perf_state: PerformanceState,
 
+    /// Memory temperature (GDDR6X)
+    pub memory_temperature: Option<Temperature>,
+
+    /// ECC memory errors
+    pub ecc_errors: Option<nvctl::domain::memory::EccErrors>,
+
+    /// PCIe metrics
+    pub pcie_metrics: Option<nvctl::domain::pcie::PcieMetrics>,
+
+    /// Encoder utilization
+    pub encoder_util: Option<nvctl::domain::performance::EncoderUtilization>,
+
+    /// Decoder utilization
+    pub decoder_util: Option<nvctl::domain::performance::DecoderUtilization>,
+
+    /// Overall GPU health score
+    pub health_score: Option<nvctl::health::HealthScore>,
+
     /// Last update timestamp
     pub last_update: Instant,
 }
@@ -301,6 +319,12 @@ impl GpuState {
             gpu_util_history: MetricsHistory::new(),
             memory_info: MemoryInfo::default(),
             perf_state: PerformanceState::default(),
+            memory_temperature: None,
+            ecc_errors: None,
+            pcie_metrics: None,
+            encoder_util: None,
+            decoder_util: None,
+            health_score: None,
             last_update: Instant::now(),
         }
     }
@@ -317,6 +341,12 @@ impl GpuState {
         self.utilization = snapshot.utilization;
         self.memory_info = snapshot.memory_info;
         self.perf_state = snapshot.perf_state;
+        self.memory_temperature = snapshot.memory_temperature;
+        self.ecc_errors = snapshot.ecc_errors;
+        self.pcie_metrics = snapshot.pcie_metrics;
+        self.encoder_util = snapshot.encoder_util;
+        self.decoder_util = snapshot.decoder_util;
+        self.health_score = snapshot.health_score;
         self.last_update = snapshot.timestamp;
 
         // Add to history

@@ -66,6 +66,15 @@ pub enum Commands {
     /// Start the control loop daemon
     Control(ControlArgs),
 
+    /// Manage alert system
+    Alerts(AlertArgs),
+
+    /// Check GPU health status
+    Health,
+
+    /// List processes running on GPU
+    Processes(ProcessesArgs),
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -92,6 +101,22 @@ pub struct InfoArgs {
     /// Show thermal information
     #[arg(long)]
     pub thermal: bool,
+
+    /// Show ECC memory error information
+    #[arg(long)]
+    pub ecc: bool,
+
+    /// Show PCIe metrics
+    #[arg(long)]
+    pub pcie: bool,
+
+    /// Show memory temperature
+    #[arg(long)]
+    pub memory_temp: bool,
+
+    /// Show video encoder/decoder utilization
+    #[arg(long)]
+    pub video: bool,
 }
 
 /// Arguments for fan control commands
@@ -176,6 +201,37 @@ pub enum ThermalCommands {
     },
 }
 
+/// Arguments for the processes command
+#[derive(Parser, Debug)]
+pub struct ProcessesArgs {
+    /// Sort by memory usage (default)
+    #[arg(short, long)]
+    pub sort_memory: bool,
+
+    /// Sort by PID
+    #[arg(long)]
+    pub sort_pid: bool,
+
+    /// Show top N processes (by memory usage)
+    #[arg(short = 'n', long)]
+    pub top: Option<usize>,
+
+    /// Filter by process type
+    #[arg(short = 't', long, value_enum)]
+    pub process_type: Option<ProcessTypeFilter>,
+}
+
+/// Process type filter for CLI
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum ProcessTypeFilter {
+    /// Graphics rendering processes
+    Graphics,
+    /// Compute/CUDA processes
+    Compute,
+    /// Both graphics and compute
+    Both,
+}
+
 /// Arguments for the control loop command
 #[derive(Parser, Debug)]
 pub struct ControlArgs {
@@ -206,6 +262,75 @@ pub struct ControlArgs {
     /// Power limit in watts (optional)
     #[arg(long)]
     pub power_limit: Option<u32>,
+}
+
+/// Arguments for alert commands
+#[derive(Parser, Debug)]
+pub struct AlertArgs {
+    #[command(subcommand)]
+    pub command: AlertCommands,
+}
+
+/// Alert subcommands
+#[derive(Subcommand, Debug)]
+pub enum AlertCommands {
+    /// Start the alert monitoring daemon
+    Start {
+        /// Check interval in seconds
+        #[arg(short, long, default_value = "5")]
+        interval: u64,
+
+        /// Path to alert configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Run in foreground (don't daemonize)
+        #[arg(short, long)]
+        foreground: bool,
+    },
+
+    /// Stop the alert monitoring daemon
+    Stop,
+
+    /// List active alerts
+    List {
+        /// Show all alerts including resolved
+        #[arg(short, long)]
+        all: bool,
+
+        /// Filter by severity
+        #[arg(short, long)]
+        severity: Option<String>,
+    },
+
+    /// List configured alert rules
+    Rules {
+        /// Path to alert configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+
+    /// Acknowledge an alert
+    Ack {
+        /// Alert ID to acknowledge
+        alert_id: String,
+    },
+
+    /// Silence an alert
+    Silence {
+        /// Alert ID to silence
+        alert_id: String,
+    },
+
+    /// Clear all resolved alerts from history
+    Clear,
+
+    /// Test alert configuration
+    Test {
+        /// Path to alert configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
 }
 
 /// Output format

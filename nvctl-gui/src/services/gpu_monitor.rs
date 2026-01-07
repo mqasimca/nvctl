@@ -136,6 +136,60 @@ impl GpuMonitor {
             }
         }
 
+        // Get Phase 1 metrics
+        let memory_temperature = device.memory_temperature().ok().flatten();
+        let ecc_errors = device.ecc_errors().ok().flatten();
+        let pcie_metrics = device.pcie_metrics().ok();
+        let encoder_util = device.encoder_utilization().ok().flatten();
+        let decoder_util = device.decoder_utilization().ok().flatten();
+
+        // Calculate health score
+        let health_score = if let Ok(thresholds) = device.thermal_thresholds() {
+            let _power_constraints = device.power_constraints().ok();
+
+            // Determine throttling status
+            let is_thermal_throttling = if let Some(slowdown) = thresholds.slowdown {
+                temperature.as_celsius() >= slowdown.as_celsius()
+            } else {
+                false
+            };
+
+            let is_power_throttling =
+                power_usage.as_watts() as f64 >= power_limit.as_watts() as f64 * 0.99;
+
+            // Calculate VRAM usage ratio
+            let vram_usage_ratio = if memory_info.total > 0 {
+                Some(memory_info.used as f64 / memory_info.total as f64)
+            } else {
+                None
+            };
+
+            // Use uptime estimate of 1 hour for ECC error rate
+            let uptime_seconds = 3600;
+
+            // Build health params
+            let params = nvctl::health::HealthParams {
+                temperature,
+                thresholds: &thresholds,
+                power_usage,
+                power_limit,
+                is_thermal_throttling,
+                is_power_throttling,
+                ecc_errors: ecc_errors.as_ref(),
+                vram_usage_ratio,
+                utilization: Some(&utilization),
+                pcie_metrics: pcie_metrics.as_ref(),
+                uptime_seconds,
+            };
+
+            // Calculate health using default weights
+            let calculator = nvctl::health::HealthCalculator::default();
+            let health = calculator.calculate(&params);
+            Some(health.overall)
+        } else {
+            None
+        };
+
         Some(GpuStateSnapshot {
             index,
             name,
@@ -149,6 +203,12 @@ impl GpuMonitor {
             utilization,
             memory_info,
             perf_state,
+            memory_temperature,
+            ecc_errors,
+            pcie_metrics,
+            encoder_util,
+            decoder_util,
+            health_score,
             timestamp: Instant::now(),
         })
     }

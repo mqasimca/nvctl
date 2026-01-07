@@ -5,7 +5,10 @@
 
 use clap::Parser;
 use nvctl::cli::args::{generate_completions, Cli, Commands};
-use nvctl::commands::{run_control, run_fan, run_info, run_list, run_power, run_thermal};
+use nvctl::commands::{
+    run_alerts, run_control, run_fan, run_health, run_info, run_list, run_power, run_processes,
+    run_thermal,
+};
 use nvctl::error::AppError;
 
 fn main() {
@@ -45,6 +48,12 @@ fn run(cli: &Cli) -> Result<(), AppError> {
         Commands::Thermal(args) => run_thermal(args, cli.format, cli.gpu, cli.dry_run),
 
         Commands::Control(args) => run_control(args, cli.format, cli.gpu, cli.dry_run, cli.verbose),
+
+        Commands::Alerts(args) => run_alerts(&args.command, cli.format),
+
+        Commands::Health => run_health(cli.format, cli.gpu),
+
+        Commands::Processes(args) => run_processes(args, cli.format, cli.gpu),
 
         Commands::Completions { shell } => {
             generate_completions(*shell);

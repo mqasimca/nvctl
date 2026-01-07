@@ -96,6 +96,10 @@ pub enum DomainError {
     #[error("Invalid temperature: {0}°C")]
     InvalidTemperature(i32),
 
+    /// Invalid value provided
+    #[error("Invalid value: {0}")]
+    InvalidValue(String),
+
     /// Invalid fan curve (not enough points, not sorted, etc.)
     #[error("Invalid fan curve: {0}")]
     InvalidFanCurve(String),
@@ -131,6 +135,10 @@ pub enum ConfigError {
     /// TOML parsing error
     #[error("TOML parse error: {0}")]
     TomlError(#[from] toml::de::Error),
+
+    /// JSON serialization error
+    #[error("JSON serialization error: {0}")]
+    JsonError(#[from] serde_json::Error),
 }
 
 /// Errors from service operations

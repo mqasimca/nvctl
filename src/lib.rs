@@ -5,19 +5,23 @@
 //!
 //! # Modules
 //!
+//! - [`alerts`]: Alerting and notification system
 //! - [`cli`]: Command-line interface definitions
 //! - [`commands`]: Command handlers
 //! - [`config`]: Configuration system
 //! - [`domain`]: Domain models with validation
 //! - [`error`]: Error types
+//! - [`health`]: GPU health scoring and monitoring
 //! - [`nvml`]: NVML abstraction layer
 //! - [`services`]: Business logic services
 
+pub mod alerts;
 pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod health;
 pub mod nvml;
 pub mod services;
 

@@ -38,7 +38,7 @@ pub enum Message {
     Tick(Instant),
 
     /// GPU state has been updated
-    GpuStateUpdated(GpuStateSnapshot),
+    GpuStateUpdated(Box<GpuStateSnapshot>),
 
     // === Fan Control ===
     /// Fan control messages
@@ -141,6 +141,18 @@ pub struct GpuStateSnapshot {
     pub memory_info: MemoryInfo,
     /// Performance state (P-state)
     pub perf_state: PerformanceState,
+    /// Memory temperature (GDDR6X)
+    pub memory_temperature: Option<Temperature>,
+    /// ECC memory errors
+    pub ecc_errors: Option<nvctl::domain::memory::EccErrors>,
+    /// PCIe metrics
+    pub pcie_metrics: Option<nvctl::domain::pcie::PcieMetrics>,
+    /// Encoder utilization
+    pub encoder_util: Option<nvctl::domain::performance::EncoderUtilization>,
+    /// Decoder utilization
+    pub decoder_util: Option<nvctl::domain::performance::DecoderUtilization>,
+    /// Overall GPU health score
+    pub health_score: Option<nvctl::health::HealthScore>,
     /// Timestamp
     pub timestamp: Instant,
 }

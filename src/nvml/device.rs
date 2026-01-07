@@ -3,9 +3,11 @@
 //! Real implementation of GpuDevice trait using nvml-wrapper.
 
 use crate::domain::{
-    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, FanPolicy, FanSpeed, GpuInfo, MemoryInfo,
-    PerformanceState, PowerConstraints, PowerLimit, Temperature, ThermalThresholds,
-    ThrottleReasons, Utilization,
+    AcousticLimits, ClockSpeed, ClockType, CoolerTarget, DecoderUtilization, EccErrors, EccMode,
+    EncoderUtilization, FanPolicy, FanSpeed, GpuInfo, MemoryInfo, PcieGeneration, PcieLinkStatus,
+    PcieLinkWidth, PcieMetrics, PcieReplayCounter, PcieThroughput, PerformanceState,
+    PowerConstraints, PowerLimit, ProcessList, Temperature, ThermalThresholds, ThrottleReasons,
+    Utilization,
 };
 use crate::error::NvmlError;
 use crate::nvml::traits::GpuDevice;
@@ -299,6 +301,214 @@ impl GpuDevice for NvmlDevice<'_> {
                 .contains(nvml_wrapper::bitmasks::device::ThrottleReasons::DISPLAY_CLOCK_SETTING),
         })
     }
+
+    fn memory_temperature(&self) -> Result<Option<Temperature>, NvmlError> {
+        // Memory temperature sensor (NVML_TEMPERATURE_MEMORY = 1)
+        // SAFETY: handle() is safe to call within the lifetime of the Device
+        match get_memory_temperature_raw(unsafe { self.device.handle() }) {
+            Ok(temp) => Ok(Some(Temperature::new(temp))),
+            Err(NvmlError::NotSupported(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn encoder_utilization(&self) -> Result<Option<EncoderUtilization>, NvmlError> {
+        // SAFETY: handle() is safe to call within the lifetime of the Device
+        match get_encoder_utilization_raw(unsafe { self.device.handle() }) {
+            Ok((utilization, sampling_period)) => {
+                Ok(Some(EncoderUtilization::new(utilization, sampling_period)))
+            }
+            Err(NvmlError::NotSupported(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn decoder_utilization(&self) -> Result<Option<DecoderUtilization>, NvmlError> {
+        // SAFETY: handle() is safe to call within the lifetime of the Device
+        match get_decoder_utilization_raw(unsafe { self.device.handle() }) {
+            Ok((utilization, sampling_period)) => {
+                Ok(Some(DecoderUtilization::new(utilization, sampling_period)))
+            }
+            Err(NvmlError::NotSupported(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn ecc_mode(&self) -> Result<Option<EccMode>, NvmlError> {
+        // Check if ECC is supported and get mode
+        match self.device.is_ecc_enabled() {
+            Ok(state) => {
+                // state is EccModeState with currently_enabled (bool) field
+                if state.currently_enabled {
+                    Ok(Some(EccMode::Enabled))
+                } else {
+                    Ok(Some(EccMode::Disabled))
+                }
+            }
+            Err(nvml_wrapper::error::NvmlError::NotSupported) => Ok(None),
+            Err(e) => Err(Self::convert_error(e)),
+        }
+    }
+
+    fn ecc_errors(&self) -> Result<Option<EccErrors>, NvmlError> {
+        use nvml_wrapper::enum_wrappers::device::{EccCounter, MemoryError};
+
+        // Check if ECC is supported
+        if self.ecc_mode()?.is_none() {
+            return Ok(None);
+        }
+
+        // Get correctable errors
+        let correctable_current = self
+            .device
+            .total_ecc_errors(MemoryError::Corrected, EccCounter::Volatile)
+            .unwrap_or(0);
+
+        let correctable_lifetime = self
+            .device
+            .total_ecc_errors(MemoryError::Corrected, EccCounter::Aggregate)
+            .unwrap_or(0);
+
+        // Get uncorrectable errors
+        let uncorrectable_current = self
+            .device
+            .total_ecc_errors(MemoryError::Uncorrected, EccCounter::Volatile)
+            .unwrap_or(0);
+
+        let uncorrectable_lifetime = self
+            .device
+            .total_ecc_errors(MemoryError::Uncorrected, EccCounter::Aggregate)
+            .unwrap_or(0);
+
+        Ok(Some(EccErrors::new(
+            correctable_current,
+            correctable_lifetime,
+            uncorrectable_current,
+            uncorrectable_lifetime,
+        )))
+    }
+
+    fn pcie_metrics(&self) -> Result<PcieMetrics, NvmlError> {
+        use nvml_wrapper::enum_wrappers::device::PcieUtilCounter;
+
+        // TODO: Get PCIe generation and link width from NVML
+        // nvml-wrapper doesn't expose these directly, need to use raw C API
+        // For now, use defaults based on max values
+
+        // Get max generation and width (available in nvml-wrapper)
+        let max_gen = match self.device.max_pcie_link_gen() {
+            Ok(gen) => match gen {
+                1 => PcieGeneration::Gen1,
+                2 => PcieGeneration::Gen2,
+                3 => PcieGeneration::Gen3,
+                4 => PcieGeneration::Gen4,
+                5 => PcieGeneration::Gen5,
+                6 => PcieGeneration::Gen6,
+                _ => PcieGeneration::Gen4, // Default for modern GPUs
+            },
+            Err(_) => PcieGeneration::Gen4,
+        };
+
+        let max_width = match self.device.max_pcie_link_width() {
+            Ok(width) => PcieLinkWidth::from_lanes(width as u8).unwrap_or(PcieLinkWidth::X16),
+            Err(_) => PcieLinkWidth::X16,
+        };
+
+        // Get current generation and width from raw NVML C API
+        // SAFETY: handle() is safe to call within the lifetime of the Device
+        let current_gen = match get_current_pcie_generation_raw(unsafe { self.device.handle() }) {
+            Ok(gen) => match gen {
+                1 => PcieGeneration::Gen1,
+                2 => PcieGeneration::Gen2,
+                3 => PcieGeneration::Gen3,
+                4 => PcieGeneration::Gen4,
+                5 => PcieGeneration::Gen5,
+                6 => PcieGeneration::Gen6,
+                _ => max_gen, // Fallback to max
+            },
+            Err(_) => max_gen, // Fallback to max if unavailable
+        };
+
+        let current_width = match get_current_pcie_link_width_raw(unsafe { self.device.handle() }) {
+            Ok(width) => PcieLinkWidth::from_lanes(width as u8).unwrap_or(max_width),
+            Err(_) => max_width, // Fallback to max if unavailable
+        };
+
+        let link_status = PcieLinkStatus::new(current_gen, max_gen, current_width, max_width);
+
+        // Get PCIe throughput
+        let tx_bytes = self
+            .device
+            .pcie_throughput(PcieUtilCounter::Send)
+            .unwrap_or(0) as u64
+            * 1024; // KB/s to bytes/s
+
+        let rx_bytes = self
+            .device
+            .pcie_throughput(PcieUtilCounter::Receive)
+            .unwrap_or(0) as u64
+            * 1024; // KB/s to bytes/s
+
+        let throughput = PcieThroughput::new(tx_bytes, rx_bytes);
+
+        // Get PCIe replay counter
+        let replay_count =
+            get_pcie_replay_counter_raw(unsafe { self.device.handle() }).unwrap_or(0);
+        let replay_counter = PcieReplayCounter::new(replay_count);
+
+        Ok(PcieMetrics::new(link_status, throughput, replay_counter))
+    }
+
+    fn running_processes(&self) -> Result<ProcessList, NvmlError> {
+        use crate::domain::{GpuProcess, ProcessType};
+        use std::collections::HashMap;
+
+        // Get graphics processes
+        // SAFETY: handle() is safe to call within the lifetime of the Device
+        let graphics_processes = get_graphics_processes_raw(unsafe { self.device.handle() })?;
+
+        // Get compute processes
+        let compute_processes = get_compute_processes_raw(unsafe { self.device.handle() })?;
+
+        // Merge processes by PID (some processes may be both graphics and compute)
+        let mut process_map: HashMap<u32, GpuProcess> = HashMap::new();
+
+        for process in graphics_processes {
+            process_map.insert(process.pid, process);
+        }
+
+        for compute_process in compute_processes {
+            if let Some(existing) = process_map.get_mut(&compute_process.pid) {
+                // Process exists in both - mark as GraphicsCompute and sum memory
+                existing.process_type = ProcessType::GraphicsCompute;
+                existing.used_memory += compute_process.used_memory;
+            } else {
+                process_map.insert(compute_process.pid, compute_process);
+            }
+        }
+
+        let mut processes: Vec<GpuProcess> = process_map.into_values().collect();
+
+        // Try to get process names from /proc on Linux
+        #[cfg(target_os = "linux")]
+        for process in &mut processes {
+            if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{}/cmdline", process.pid)) {
+                // cmdline has null-separated args, take first one
+                if let Some(name) = cmdline.split('\0').next() {
+                    if !name.is_empty() {
+                        // Extract just the executable name
+                        let exe_name = std::path::Path::new(name)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(name);
+                        process.name = Some(exe_name.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(ProcessList::new(processes))
+    }
 }
 
 /// Get temperature threshold using raw FFI
@@ -418,5 +628,333 @@ fn get_cooler_target_raw(
             "nvmlDeviceGetCoolerInfo error code: {}",
             result
         )))
+    }
+}
+
+/// Get memory temperature using raw FFI
+///
+/// NVML_TEMPERATURE_MEMORY = 1
+fn get_memory_temperature_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<i32, NvmlError> {
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::nvmlReturn_enum_NVML_SUCCESS;
+    use std::os::raw::c_uint;
+
+    type GetTemperatureFn = unsafe extern "C" fn(
+        nvml_wrapper_sys::bindings::nvmlDevice_t,
+        c_uint,
+        *mut c_uint,
+    ) -> c_uint;
+
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .map_err(|e| NvmlError::Unknown(format!("Failed to load NVML library: {}", e)))?;
+
+    let func: Symbol<GetTemperatureFn> = unsafe { lib.get(b"nvmlDeviceGetTemperature") }
+        .map_err(|e| NvmlError::NotSupported(format!("Function not available: {}", e)))?;
+
+    let mut temp: c_uint = 0;
+    let result = unsafe { func(handle, 1, &mut temp) }; // 1 = NVML_TEMPERATURE_MEMORY
+
+    if result == nvmlReturn_enum_NVML_SUCCESS {
+        Ok(temp as i32)
+    } else if result == 3 {
+        // NVML_ERROR_NOT_SUPPORTED
+        Err(NvmlError::NotSupported(
+            "Memory temperature not supported on this GPU".to_string(),
+        ))
+    } else {
+        Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+    }
+}
+
+/// Get encoder utilization using raw FFI
+///
+/// Returns (utilization_percent, sampling_period_us)
+fn get_encoder_utilization_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<(u8, u32), NvmlError> {
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::nvmlReturn_enum_NVML_SUCCESS;
+    use std::os::raw::c_uint;
+
+    type GetEncoderUtilFn = unsafe extern "C" fn(
+        nvml_wrapper_sys::bindings::nvmlDevice_t,
+        *mut c_uint,
+        *mut c_uint,
+    ) -> c_uint;
+
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .map_err(|e| NvmlError::Unknown(format!("Failed to load NVML library: {}", e)))?;
+
+    let func: Symbol<GetEncoderUtilFn> = unsafe { lib.get(b"nvmlDeviceGetEncoderUtilization") }
+        .map_err(|e| NvmlError::NotSupported(format!("Function not available: {}", e)))?;
+
+    let mut utilization: c_uint = 0;
+    let mut sampling_period: c_uint = 0;
+    let result = unsafe { func(handle, &mut utilization, &mut sampling_period) };
+
+    if result == nvmlReturn_enum_NVML_SUCCESS {
+        Ok((utilization as u8, sampling_period))
+    } else if result == 3 {
+        Err(NvmlError::NotSupported(
+            "Encoder utilization not supported on this GPU".to_string(),
+        ))
+    } else {
+        Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+    }
+}
+
+/// Get decoder utilization using raw FFI
+///
+/// Returns (utilization_percent, sampling_period_us)
+fn get_decoder_utilization_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<(u8, u32), NvmlError> {
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::nvmlReturn_enum_NVML_SUCCESS;
+    use std::os::raw::c_uint;
+
+    type GetDecoderUtilFn = unsafe extern "C" fn(
+        nvml_wrapper_sys::bindings::nvmlDevice_t,
+        *mut c_uint,
+        *mut c_uint,
+    ) -> c_uint;
+
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .map_err(|e| NvmlError::Unknown(format!("Failed to load NVML library: {}", e)))?;
+
+    let func: Symbol<GetDecoderUtilFn> = unsafe { lib.get(b"nvmlDeviceGetDecoderUtilization") }
+        .map_err(|e| NvmlError::NotSupported(format!("Function not available: {}", e)))?;
+
+    let mut utilization: c_uint = 0;
+    let mut sampling_period: c_uint = 0;
+    let result = unsafe { func(handle, &mut utilization, &mut sampling_period) };
+
+    if result == nvmlReturn_enum_NVML_SUCCESS {
+        Ok((utilization as u8, sampling_period))
+    } else if result == 3 {
+        Err(NvmlError::NotSupported(
+            "Decoder utilization not supported on this GPU".to_string(),
+        ))
+    } else {
+        Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+    }
+}
+
+/// Get current PCIe generation using raw FFI
+fn get_current_pcie_generation_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<u32, NvmlError> {
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::nvmlReturn_enum_NVML_SUCCESS;
+    use std::os::raw::c_uint;
+
+    type GetPcieGenFn =
+        unsafe extern "C" fn(nvml_wrapper_sys::bindings::nvmlDevice_t, *mut c_uint) -> c_uint;
+
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .map_err(|e| NvmlError::Unknown(format!("Failed to load NVML library: {}", e)))?;
+
+    let func: Symbol<GetPcieGenFn> = unsafe { lib.get(b"nvmlDeviceGetCurrPcieLinkGeneration") }
+        .map_err(|e| NvmlError::NotSupported(format!("Function not available: {}", e)))?;
+
+    let mut generation: c_uint = 0;
+    let result = unsafe { func(handle, &mut generation) };
+
+    if result == nvmlReturn_enum_NVML_SUCCESS {
+        Ok(generation)
+    } else if result == 3 {
+        Err(NvmlError::NotSupported(
+            "Current PCIe generation not supported on this GPU".to_string(),
+        ))
+    } else {
+        Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+    }
+}
+
+/// Get current PCIe link width using raw FFI
+fn get_current_pcie_link_width_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<u32, NvmlError> {
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::nvmlReturn_enum_NVML_SUCCESS;
+    use std::os::raw::c_uint;
+
+    type GetPcieLinkWidthFn =
+        unsafe extern "C" fn(nvml_wrapper_sys::bindings::nvmlDevice_t, *mut c_uint) -> c_uint;
+
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .map_err(|e| NvmlError::Unknown(format!("Failed to load NVML library: {}", e)))?;
+
+    let func: Symbol<GetPcieLinkWidthFn> = unsafe { lib.get(b"nvmlDeviceGetCurrPcieLinkWidth") }
+        .map_err(|e| NvmlError::NotSupported(format!("Function not available: {}", e)))?;
+
+    let mut width: c_uint = 0;
+    let result = unsafe { func(handle, &mut width) };
+
+    if result == nvmlReturn_enum_NVML_SUCCESS {
+        Ok(width)
+    } else if result == 3 {
+        Err(NvmlError::NotSupported(
+            "Current PCIe link width not supported on this GPU".to_string(),
+        ))
+    } else {
+        Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+    }
+}
+
+/// Get PCIe replay counter using raw FFI
+fn get_pcie_replay_counter_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<u64, NvmlError> {
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::nvmlReturn_enum_NVML_SUCCESS;
+    use std::os::raw::c_uint;
+
+    type GetPcieReplayFn =
+        unsafe extern "C" fn(nvml_wrapper_sys::bindings::nvmlDevice_t, *mut c_uint) -> c_uint;
+
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .map_err(|e| NvmlError::Unknown(format!("Failed to load NVML library: {}", e)))?;
+
+    let func: Symbol<GetPcieReplayFn> = unsafe { lib.get(b"nvmlDeviceGetPcieReplayCounter") }
+        .map_err(|e| NvmlError::NotSupported(format!("Function not available: {}", e)))?;
+
+    let mut counter: c_uint = 0;
+    let result = unsafe { func(handle, &mut counter) };
+
+    if result == nvmlReturn_enum_NVML_SUCCESS {
+        Ok(counter as u64)
+    } else if result == 3 {
+        Err(NvmlError::NotSupported(
+            "PCIe replay counter not supported on this GPU".to_string(),
+        ))
+    } else {
+        Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+    }
+}
+
+/// Get running graphics processes using raw NVML C API
+///
+/// # Safety
+/// This function uses unsafe FFI calls to the NVML library.
+fn get_graphics_processes_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<Vec<crate::domain::GpuProcess>, NvmlError> {
+    use crate::domain::{GpuProcess, ProcessType};
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::{nvmlDevice_t, nvmlReturn_enum, nvmlReturn_enum_NVML_SUCCESS};
+    use std::mem;
+    use std::os::raw::{c_uint, c_ulonglong};
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct nvmlProcessInfo_t {
+        pid: c_uint,
+        used_gpu_memory: c_ulonglong,
+    }
+
+    // SAFETY: Loading NVML library
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .or_else(|_| unsafe { Library::new("libnvidia-ml.so") })
+        .map_err(|_e| NvmlError::LibraryNotFound)?;
+
+    type GetGraphicsProcessesFn =
+        unsafe extern "C" fn(nvmlDevice_t, *mut c_uint, *mut nvmlProcessInfo_t) -> nvmlReturn_enum;
+
+    // SAFETY: Loading function symbol from library
+    let func: Symbol<GetGraphicsProcessesFn> =
+        unsafe { lib.get(b"nvmlDeviceGetGraphicsRunningProcesses\0") }
+            .map_err(|e| NvmlError::NotSupported(format!("Function not available: {}", e)))?;
+
+    // First call to get count
+    let mut count: c_uint = 0;
+    let result = unsafe { func(handle, &mut count, std::ptr::null_mut()) };
+
+    if result == 7 {
+        // NVML_ERROR_INSUFFICIENT_SIZE - expected on first call
+        // Allocate buffer
+        let mut processes: Vec<nvmlProcessInfo_t> = vec![unsafe { mem::zeroed() }; count as usize];
+
+        // Second call to get actual data
+        let result = unsafe { func(handle, &mut count, processes.as_mut_ptr()) };
+
+        if result == nvmlReturn_enum_NVML_SUCCESS {
+            Ok(processes
+                .into_iter()
+                .take(count as usize)
+                .map(|p| GpuProcess::new(p.pid, p.used_gpu_memory, ProcessType::Graphics))
+                .collect())
+        } else {
+            Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+        }
+    } else if result == nvmlReturn_enum_NVML_SUCCESS {
+        // No processes
+        Ok(Vec::new())
+    } else {
+        Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+    }
+}
+
+/// Get running compute processes using raw NVML C API
+///
+/// # Safety
+/// This function uses unsafe FFI calls to the NVML library.
+fn get_compute_processes_raw(
+    handle: nvml_wrapper_sys::bindings::nvmlDevice_t,
+) -> Result<Vec<crate::domain::GpuProcess>, NvmlError> {
+    use crate::domain::{GpuProcess, ProcessType};
+    use libloading::{Library, Symbol};
+    use nvml_wrapper_sys::bindings::{nvmlDevice_t, nvmlReturn_enum, nvmlReturn_enum_NVML_SUCCESS};
+    use std::mem;
+    use std::os::raw::{c_uint, c_ulonglong};
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct nvmlProcessInfo_t {
+        pid: c_uint,
+        used_gpu_memory: c_ulonglong,
+    }
+
+    // SAFETY: Loading NVML library
+    let lib = unsafe { Library::new("libnvidia-ml.so.1") }
+        .or_else(|_| unsafe { Library::new("libnvidia-ml.so") })
+        .map_err(|_e| NvmlError::LibraryNotFound)?;
+
+    type GetComputeProcessesFn =
+        unsafe extern "C" fn(nvmlDevice_t, *mut c_uint, *mut nvmlProcessInfo_t) -> nvmlReturn_enum;
+
+    // SAFETY: Loading function symbol from library
+    let func: Symbol<GetComputeProcessesFn> =
+        unsafe { lib.get(b"nvmlDeviceGetComputeRunningProcesses\0") }
+            .map_err(|e| NvmlError::NotSupported(format!("Function not available: {}", e)))?;
+
+    // First call to get count
+    let mut count: c_uint = 0;
+    let result = unsafe { func(handle, &mut count, std::ptr::null_mut()) };
+
+    if result == 7 {
+        // NVML_ERROR_INSUFFICIENT_SIZE - expected on first call
+        // Allocate buffer
+        let mut processes: Vec<nvmlProcessInfo_t> = vec![unsafe { mem::zeroed() }; count as usize];
+
+        // Second call to get actual data
+        let result = unsafe { func(handle, &mut count, processes.as_mut_ptr()) };
+
+        if result == nvmlReturn_enum_NVML_SUCCESS {
+            Ok(processes
+                .into_iter()
+                .take(count as usize)
+                .map(|p| GpuProcess::new(p.pid, p.used_gpu_memory, ProcessType::Compute))
+                .collect())
+        } else {
+            Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
+        }
+    } else if result == nvmlReturn_enum_NVML_SUCCESS {
+        // No processes
+        Ok(Vec::new())
+    } else {
+        Err(NvmlError::Unknown(format!("NVML error code: {}", result)))
     }
 }

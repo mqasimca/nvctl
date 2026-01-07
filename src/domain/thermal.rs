@@ -56,6 +56,59 @@ impl From<Temperature> for i32 {
     }
 }
 
+/// Temperature sensor type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TemperatureSensor {
+    /// GPU core/die temperature
+    Gpu,
+    /// Memory (VRAM) temperature
+    Memory,
+}
+
+impl fmt::Display for TemperatureSensor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gpu => write!(f, "GPU"),
+            Self::Memory => write!(f, "Memory"),
+        }
+    }
+}
+
+/// Temperature reading with sensor type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemperatureReading {
+    /// Temperature sensor type
+    pub sensor: TemperatureSensor,
+    /// Temperature value
+    pub temperature: Temperature,
+}
+
+impl TemperatureReading {
+    /// Create new temperature reading
+    pub fn new(sensor: TemperatureSensor, temperature: Temperature) -> Self {
+        Self {
+            sensor,
+            temperature,
+        }
+    }
+
+    /// Create GPU temperature reading
+    pub fn gpu(temperature: Temperature) -> Self {
+        Self::new(TemperatureSensor::Gpu, temperature)
+    }
+
+    /// Create memory temperature reading
+    pub fn memory(temperature: Temperature) -> Self {
+        Self::new(TemperatureSensor::Memory, temperature)
+    }
+}
+
+impl fmt::Display for TemperatureReading {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.sensor, self.temperature)
+    }
+}
+
 /// GPU thermal thresholds
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ThermalThresholds {
@@ -149,6 +202,24 @@ mod tests {
     fn test_temperature_from_u32() {
         let temp: Temperature = 65u32.into();
         assert_eq!(temp.as_celsius(), 65);
+    }
+
+    #[test]
+    fn test_temperature_sensor_display() {
+        assert_eq!(format!("{}", TemperatureSensor::Gpu), "GPU");
+        assert_eq!(format!("{}", TemperatureSensor::Memory), "Memory");
+    }
+
+    #[test]
+    fn test_temperature_reading() {
+        let reading = TemperatureReading::gpu(Temperature::new(65));
+        assert_eq!(reading.sensor, TemperatureSensor::Gpu);
+        assert_eq!(reading.temperature.as_celsius(), 65);
+        assert_eq!(format!("{}", reading), "GPU: 65°C");
+
+        let mem_reading = TemperatureReading::memory(Temperature::new(85));
+        assert_eq!(mem_reading.sensor, TemperatureSensor::Memory);
+        assert_eq!(format!("{}", mem_reading), "Memory: 85°C");
     }
 
     #[test]

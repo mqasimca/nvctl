@@ -207,7 +207,7 @@ impl NvctlGui {
             }
 
             Message::GpuStateUpdated(snapshot) => {
-                self.state.update_gpu(snapshot);
+                self.state.update_gpu(*snapshot);
                 Task::none()
             }
 

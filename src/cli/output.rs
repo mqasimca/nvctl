@@ -224,6 +224,266 @@ impl TableDisplay for AcousticStatus {
     }
 }
 
+/// ECC memory error status display
+#[derive(Debug, Clone, Serialize)]
+pub struct EccStatus {
+    pub gpu_name: String,
+    pub gpu_index: u32,
+    pub ecc_enabled: bool,
+    pub correctable_current: Option<u64>,
+    pub correctable_aggregate: Option<u64>,
+    pub uncorrectable_current: Option<u64>,
+    pub uncorrectable_aggregate: Option<u64>,
+    pub health_status: Option<String>,
+}
+
+impl TableDisplay for EccStatus {
+    fn to_table(&self) -> String {
+        let mut output = format!("[{}] {}\n", self.gpu_index, self.gpu_name);
+
+        if !self.ecc_enabled {
+            output.push_str("  ECC: Not Supported/Disabled\n");
+            return output;
+        }
+
+        output.push_str("  ECC: Enabled\n");
+
+        if let Some(count) = self.correctable_current {
+            output.push_str(&format!("  Correctable Errors (Current Boot): {}\n", count));
+        }
+        if let Some(count) = self.correctable_aggregate {
+            output.push_str(&format!("  Correctable Errors (Lifetime): {}\n", count));
+        }
+        if let Some(count) = self.uncorrectable_current {
+            output.push_str(&format!(
+                "  Uncorrectable Errors (Current Boot): {}\n",
+                count
+            ));
+        }
+        if let Some(count) = self.uncorrectable_aggregate {
+            output.push_str(&format!("  Uncorrectable Errors (Lifetime): {}\n", count));
+        }
+        if let Some(health) = &self.health_status {
+            output.push_str(&format!("  Health Status: {}\n", health));
+        }
+
+        output
+    }
+}
+
+/// PCIe metrics display
+#[derive(Debug, Clone, Serialize)]
+pub struct PcieStatus {
+    pub gpu_name: String,
+    pub gpu_index: u32,
+    pub current_gen: String,
+    pub max_gen: String,
+    pub current_width: String,
+    pub max_width: String,
+    pub tx_throughput_mbs: Option<f64>,
+    pub rx_throughput_mbs: Option<f64>,
+    pub replay_counter: u32,
+    pub bandwidth_efficiency: Option<f64>,
+}
+
+impl TableDisplay for PcieStatus {
+    fn to_table(&self) -> String {
+        let mut output = format!("[{}] {}\n", self.gpu_index, self.gpu_name);
+        output.push_str(&format!(
+            "  PCIe Link: {} x{} (Max: {} x{})\n",
+            self.current_gen, self.current_width, self.max_gen, self.max_width
+        ));
+
+        if let (Some(tx), Some(rx)) = (self.tx_throughput_mbs, self.rx_throughput_mbs) {
+            output.push_str(&format!(
+                "  Throughput: TX {:.2} MB/s, RX {:.2} MB/s\n",
+                tx, rx
+            ));
+        }
+
+        if let Some(eff) = self.bandwidth_efficiency {
+            output.push_str(&format!("  Bandwidth Efficiency: {:.1}%\n", eff));
+        }
+
+        output.push_str(&format!("  Replay Counter: {}\n", self.replay_counter));
+
+        output
+    }
+}
+
+/// Memory temperature display
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryTempStatus {
+    pub gpu_name: String,
+    pub gpu_index: u32,
+    pub gpu_temp: i32,
+    pub memory_temp: Option<i32>,
+}
+
+impl TableDisplay for MemoryTempStatus {
+    fn to_table(&self) -> String {
+        let mut output = format!("[{}] {}\n", self.gpu_index, self.gpu_name);
+        output.push_str(&format!("  GPU Temperature: {}°C\n", self.gpu_temp));
+
+        if let Some(temp) = self.memory_temp {
+            output.push_str(&format!("  Memory Temperature: {}°C\n", temp));
+        } else {
+            output.push_str("  Memory Temperature: Not Supported\n");
+        }
+
+        output
+    }
+}
+
+/// Video encoder/decoder utilization display
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoStatus {
+    pub gpu_name: String,
+    pub gpu_index: u32,
+    pub encoder_util: Option<u32>,
+    pub decoder_util: Option<u32>,
+}
+
+impl TableDisplay for VideoStatus {
+    fn to_table(&self) -> String {
+        let mut output = format!("[{}] {}\n", self.gpu_index, self.gpu_name);
+
+        if let Some(util) = self.encoder_util {
+            output.push_str(&format!("  Encoder Utilization: {}%\n", util));
+        } else {
+            output.push_str("  Encoder Utilization: Not Supported\n");
+        }
+
+        if let Some(util) = self.decoder_util {
+            output.push_str(&format!("  Decoder Utilization: {}%\n", util));
+        } else {
+            output.push_str("  Decoder Utilization: Not Supported\n");
+        }
+
+        output
+    }
+}
+
+/// GPU health status display
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthStatus {
+    pub gpu_name: String,
+    pub gpu_index: u32,
+    pub overall_score: u8,
+    pub thermal_score: u8,
+    pub power_score: u8,
+    pub memory_score: u8,
+    pub performance_score: u8,
+    pub pcie_score: u8,
+    pub status: String,
+    pub issues: Vec<String>,
+    pub recommendations: Vec<String>,
+    pub throttle_reasons: Option<String>,
+}
+
+impl TableDisplay for HealthStatus {
+    fn to_table(&self) -> String {
+        let mut output = format!("[{}] {}\n", self.gpu_index, self.gpu_name);
+        output.push_str(&format!(
+            "  Overall Health: {}/100 ({})\n\n",
+            self.overall_score, self.status
+        ));
+
+        output.push_str("  Component Health Scores:\n");
+        output.push_str(&format!("    Thermal:      {}/100\n", self.thermal_score));
+        output.push_str(&format!("    Power:        {}/100\n", self.power_score));
+        output.push_str(&format!("    Memory:       {}/100\n", self.memory_score));
+        output.push_str(&format!(
+            "    Performance:  {}/100\n",
+            self.performance_score
+        ));
+        output.push_str(&format!("    PCIe:         {}/100\n", self.pcie_score));
+
+        if !self.issues.is_empty() {
+            output.push_str("\n  Issues Detected:\n");
+            for issue in &self.issues {
+                output.push_str(&format!("    • {}\n", issue));
+            }
+        }
+
+        if !self.recommendations.is_empty() {
+            output.push_str("\n  Recommendations:\n");
+            for rec in &self.recommendations {
+                output.push_str(&format!("    ✓ {}\n", rec));
+            }
+        }
+
+        if let Some(throttle) = &self.throttle_reasons {
+            output.push_str(&format!("\n  Throttling: {}\n", throttle));
+        }
+
+        output
+    }
+}
+
+/// Process list output
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessListOutput {
+    pub gpu_name: String,
+    pub gpu_index: u32,
+    pub process_count: usize,
+    pub total_memory_mb: f64,
+    pub total_memory_gb: f64,
+    pub processes: Vec<ProcessEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessEntry {
+    pub pid: u32,
+    pub name: String,
+    pub memory_mb: f64,
+    pub memory_gb: f64,
+    pub process_type: String,
+}
+
+impl TableDisplay for ProcessListOutput {
+    fn to_table(&self) -> String {
+        let mut output = format!("[{}] {}\n", self.gpu_index, self.gpu_name);
+        output.push_str(&format!(
+            "  Processes: {} (Total Memory: {:.2} GB)\n\n",
+            self.process_count, self.total_memory_gb
+        ));
+
+        if self.processes.is_empty() {
+            output.push_str("  No processes running on GPU\n");
+            return output;
+        }
+
+        // Table header
+        output.push_str("  PID      Memory      Type           Name\n");
+        output.push_str("  ────────────────────────────────────────────────────────────\n");
+
+        // Table rows
+        for process in &self.processes {
+            output.push_str(&format!(
+                "  {:<8} {:<11} {:<14} {}\n",
+                process.pid,
+                format!("{:.1} MB", process.memory_mb),
+                process.process_type,
+                process.name
+            ));
+        }
+
+        output
+    }
+
+    fn to_compact(&self) -> String {
+        if self.processes.is_empty() {
+            format!("GPU {}: No processes", self.gpu_index)
+        } else {
+            format!(
+                "GPU {}: {} processes, {:.2} GB total",
+                self.gpu_index, self.process_count, self.total_memory_gb
+            )
+        }
+    }
+}
+
 /// Simple message output
 #[derive(Debug, Clone, Serialize)]
 pub struct Message {
