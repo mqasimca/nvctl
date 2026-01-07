@@ -35,7 +35,8 @@ jobs:
             libfreetype6-dev \
             libxcb-render0-dev \
             libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+            libxcb-xfixes0-dev \
+            libdbus-1-dev
 
           # Create stub NVIDIA library for compilation (actual GPU not needed)
           sudo mkdir -p /usr/lib/x86_64-linux-gnu/stubs
