@@ -1,0 +1,193 @@
+name: Release
+
+on:
+  release:
+    types: [created, published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Build Linux Binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build CLI (nvctl)
+        run: |
+          cargo build --release --bin nvctl
+          strip target/release/nvctl
+
+      - name: Build GUI (nvctl-gui)
+        run: |
+          cargo build --release --bin nvctl-gui --package nvctl-gui
+          strip target/release/nvctl-gui
+
+      - name: Run tests
+        run: cargo test --release
+
+      - name: Create archive
+        run: |
+          mkdir -p dist
+          tar -czf dist/nvctl-linux-x86_64.tar.gz \
+            -C target/release nvctl nvctl-gui \
+            -C ../../ README.md LICENSE
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum nvctl-linux-x86_64.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Upload CLI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvctl-linux-x86_64
+          path: target/release/nvctl
+
+      - name: Upload GUI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvctl-gui-linux-x86_64
+          path: target/release/nvctl-gui
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvctl-linux-archive
+          path: dist/nvctl-linux-x86_64.tar.gz
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: dist/checksums.txt
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/nvctl-linux-x86_64.tar.gz
+            dist/checksums.txt
+            target/release/nvctl
+            target/release/nvctl-gui
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  create-release-notes:
+    name: Generate Release Notes
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate changelog
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPO_NAME: ${{ github.repository }}
+        run: |
+          # Get the previous tag
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          echo "## Changes" > release_notes.md
+          echo "" >> release_notes.md
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "Changes since $PREVIOUS_TAG:" >> release_notes.md
+            echo "" >> release_notes.md
+
+            # Get commit messages between tags
+            git log --pretty=format:"- %s (%h)" "$PREVIOUS_TAG..$RELEASE_TAG" >> release_notes.md
+          else
+            echo "Initial release" >> release_notes.md
+            echo "" >> release_notes.md
+            git log --pretty=format:"- %s (%h)" >> release_notes.md
+          fi
+
+          echo "" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## Installation" >> release_notes.md
+          echo "" >> release_notes.md
+          echo '```bash' >> release_notes.md
+          echo "# Download and extract" >> release_notes.md
+          echo "wget https://github.com/$REPO_NAME/releases/download/$RELEASE_TAG/nvctl-linux-x86_64.tar.gz" >> release_notes.md
+          echo "tar -xzf nvctl-linux-x86_64.tar.gz" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# Install to system" >> release_notes.md
+          echo "sudo cp nvctl /usr/local/bin/" >> release_notes.md
+          echo "sudo cp nvctl-gui /usr/local/bin/" >> release_notes.md
+          echo '```' >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## Verify Installation" >> release_notes.md
+          echo "" >> release_notes.md
+          echo '```bash' >> release_notes.md
+          echo "# Verify checksum" >> release_notes.md
+          echo "sha256sum -c checksums.txt" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# Test CLI" >> release_notes.md
+          echo "nvctl --version" >> release_notes.md
+          echo "nvctl list" >> release_notes.md
+          echo '```' >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## Requirements" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "- NVIDIA GPU with proprietary driver" >> release_notes.md
+          echo "- NVIDIA driver version 520+ recommended" >> release_notes.md
+          echo "- Linux with libnvidia-ml.so (included in nvidia-utils)" >> release_notes.md
+
+          cat release_notes.md
+
+      - name: Update release notes
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: release_notes.md
+          append_body: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

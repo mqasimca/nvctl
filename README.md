@@ -12,6 +12,10 @@ A fast, safe NVIDIA GPU control tool written in Rust. Manage fan speeds, power l
 - **Power Management** - Set and monitor GPU power limits with constraint validation
 - **Thermal Monitoring** - Real-time temperature and threshold management
 - **Acoustic Limiting** - GPU temperature targets for noise control
+- **Health Monitoring** - Comprehensive GPU health scoring with issue detection
+- **Process Monitoring** - List GPU processes with memory usage and filtering
+- **Alert System** - Configurable alerts for temperature, power, and hardware issues
+- **Advanced Metrics** - ECC errors, PCIe bandwidth, memory temperature, video encoder/decoder
 - **Multi-GPU Support** - Target by index, name, or UUID
 - **Multiple Output Formats** - Table, JSON, and compact output
 - **Dry-Run Mode** - Preview changes before applying
@@ -20,11 +24,13 @@ A fast, safe NVIDIA GPU control tool written in Rust. Manage fan speeds, power l
 
 ### GUI Application (nvctl-gui)
 - **Glossy Glassmorphism Design** - Modern, vibrant interface with glass effects
-- **Real-time Monitoring** - Live temperature, fan speed, and power gauges
+- **Real-time Monitoring** - Live gauges for temperature, fan speed, power, and utilization
+- **Advanced Metrics Dashboard** - ECC errors, PCIe bandwidth, memory temp, video encoder/decoder
+- **Health Score Widget** - Visual GPU health gauge with component breakdown
 - **Interactive Fan Curves** - Drag-and-drop curve editor with visual feedback
 - **Multi-GPU Dashboard** - Overview of all GPUs with link/unlink control
 - **Profile System** - Save and load configuration profiles
-- **Temperature History** - Visual graph of temperature over time
+- **Multi-Series Graphs** - Historical tracking of temperature, power, and performance
 - **Per-Fan Control** - Individual fan speed control with cooler target info
 
 ## Installation
@@ -59,6 +65,12 @@ nvctl list
 # Show GPU information
 nvctl info --all
 
+# Check GPU health
+nvctl health
+
+# List processes using GPU
+nvctl processes --top 5
+
 # Check fan status
 nvctl fan status
 
@@ -68,6 +80,9 @@ sudo nvctl fan speed 75
 
 # Set power limit to 250W
 sudo nvctl power limit 250
+
+# View alert rules
+nvctl alerts rules
 
 # Preview changes without applying
 nvctl --dry-run fan speed 100
@@ -87,7 +102,14 @@ nvctl-gui
 
 ### GUI Features
 
-- **Dashboard** - Real-time gauges for temperature, fan speed, and power with colorful gradients
+- **Dashboard** - Real-time gauges with glassmorphic design
+  - Temperature, fan speed, power, and utilization gauges
+  - ECC memory error tracking
+  - PCIe bandwidth and link status visualization
+  - Memory temperature monitoring (GDDR6X)
+  - Video encoder/decoder utilization
+  - GPU health score with component breakdown
+  - Quick stats (clocks, VRAM, P-state)
 - **Fan Control** - Interactive fan curve editor with drag-and-drop points
 - **Power Control** - Slider-based power limit adjustment with constraints display
 - **Thermal Control** - Temperature threshold configuration
@@ -103,6 +125,38 @@ make gui-check    # Check GUI code (fmt + clippy)
 make gui-test     # Run GUI tests
 make gui-build    # Build GUI release binary
 ```
+
+## Screenshots
+
+### Dashboard
+Real-time monitoring with all GPU metrics at a glance.
+
+![Dashboard](screenshots/dashboard.png)
+
+### Fan Control
+Interactive fan curve editor with drag-and-drop temperature/speed points.
+
+![Fan Control](screenshots/fan-control.png)
+
+### Power Management
+Precise power limit control with visual feedback.
+
+![Power Control](screenshots/power.png)
+
+### Thermal Control
+Temperature threshold configuration.
+
+![Thermal Control](screenshots/thermal.png)
+
+### Profile Management
+Save and load GPU configuration profiles.
+
+![Profiles](screenshots/profile.png)
+
+### Settings
+Application preferences and refresh rate control.
+
+![Settings](screenshots/settings.png)
 
 ## CLI Usage
 
@@ -121,8 +175,12 @@ nvctl info --all              # All details
 nvctl info --fan              # Fan info only
 nvctl info --power            # Power info only
 nvctl info --thermal          # Thermal info only
+nvctl info --ecc              # ECC memory errors
+nvctl info --pcie             # PCIe bandwidth and link status
+nvctl info --memory-temp      # Memory temperature (GDDR6X)
+nvctl info --video            # Video encoder/decoder utilization
 nvctl --gpu 0 info --all      # Specific GPU
-nvctl --gpu-name "RTX 4090" info  # By name
+nvctl --gpu-name "RTX 5080" info  # By name
 ```
 
 ### Fan Control
@@ -172,6 +230,91 @@ nvctl --dry-run thermal limit 75
 ```
 
 Note: Not all GPUs support acoustic temperature limits.
+
+### Health Monitoring
+
+Check overall GPU health with component-specific scoring:
+
+```bash
+# Check GPU health
+nvctl health
+
+# JSON output for monitoring
+nvctl health --format json
+```
+
+Health scoring covers:
+- **Thermal Health** - Temperature vs. thresholds
+- **Power Health** - Power usage efficiency
+- **Memory Health** - ECC errors and utilization
+- **Performance Health** - Utilization and throttling
+- **PCIe Health** - Link status and errors
+
+### Process Monitoring
+
+List processes running on the GPU with memory usage:
+
+```bash
+# List all processes
+nvctl processes
+
+# Show top 5 by memory
+nvctl processes --top 5
+
+# Sort by PID instead of memory
+nvctl processes --sort-pid
+
+# Filter by process type
+nvctl processes --process-type graphics
+nvctl processes --process-type compute
+nvctl processes --process-type both
+
+# JSON output
+nvctl processes --format json
+```
+
+Process types:
+- **Graphics** - Display/rendering workloads
+- **Compute** - CUDA/OpenCL compute tasks
+- **Graphics+Compute** - Hybrid workloads
+
+### Alert System
+
+Monitor GPU metrics with configurable alerts:
+
+```bash
+# List configured alert rules
+nvctl alerts rules
+
+# List active alerts
+nvctl alerts list
+
+# Start alert monitoring daemon
+sudo nvctl alerts start
+
+# Stop alert daemon
+sudo nvctl alerts stop
+
+# Acknowledge an alert
+nvctl alerts ack <alert-id>
+
+# Silence an alert temporarily
+nvctl alerts silence <alert-id> --duration 1h
+
+# Clear resolved alerts
+nvctl alerts clear
+
+# Test alert configuration
+nvctl alerts test
+```
+
+Default alert rules (in `~/.config/nvctl/alerts.toml`):
+- High GPU temperature (>80°C for 30s)
+- Critical temperature (>85°C for 10s)
+- Emergency temperature (>90°C, shutdown risk)
+- High power usage (>95% for 60s)
+- ECC uncorrectable errors detected
+- PCIe link errors/replay counter
 
 ### Daemon Mode (Fan Curves)
 
@@ -326,12 +469,18 @@ nvctl list
 nvctl info
 nvctl fan status
 nvctl power status
+nvctl health
+nvctl processes
+nvctl alerts list
+nvctl alerts rules
 
 # Requires sudo
 sudo nvctl fan policy manual
 sudo nvctl fan speed 75
 sudo nvctl power limit 250
 sudo nvctl thermal limit 80
+sudo nvctl alerts start
+sudo nvctl alerts stop
 ```
 
 For non-root access, add a udev rule:
@@ -390,48 +539,6 @@ nvidia-smi -L
 
 # Verify driver
 lsmod | grep nvidia
-```
-
-## Architecture
-
-```
-CLI (clap) → Commands → Services → NVML Abstraction → Hardware
-GUI (iced) → App State → Services → NVML Abstraction → Hardware
-```
-
-### CLI Structure (nvctl)
-
-```
-src/
-├── main.rs           # Entry point
-├── lib.rs            # Library exports
-├── error.rs          # Error types (AppError, NvmlError, DomainError)
-├── cli/
-│   ├── args.rs       # CLI argument definitions
-│   └── output.rs     # Output formatting
-├── commands/         # Command handlers (list, info, fan, power, thermal, control)
-├── domain/           # Validated types (FanSpeed, Temperature, PowerLimit)
-├── services/         # Business logic (FanService, PowerService)
-├── nvml/
-│   ├── traits.rs     # GpuDevice trait abstraction
-│   ├── device.rs     # Real NVML implementation
-│   └── wrapper.rs    # NVML initialization
-├── config/           # TOML configuration system
-└── mock.rs           # Test mocks
-```
-
-### GUI Structure (nvctl-gui)
-
-```
-nvctl-gui/src/
-├── main.rs           # Entry point
-├── app.rs            # Iced application (state, update, view)
-├── message.rs        # Message types for Elm architecture
-├── state.rs          # Application state management
-├── theme.rs          # Glossy theme colors and styling
-├── views/            # Screen views (dashboard, fan, power, thermal, profiles)
-├── widgets/          # Custom canvas widgets (gauges, graphs, curve editor)
-└── services/         # GPU monitor, curve daemon, profiles, config
 ```
 
 ## Building

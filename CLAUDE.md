@@ -28,19 +28,104 @@ make clean          # Remove build artifacts
 
 ## Architecture
 
-```
-CLI (clap) → Commands → Services → NVML → Hardware
+### High-Level Flow
 
-src/main.rs          # Entry point only
-src/error.rs         # Error types (AppError, NvmlError, DomainError)
-src/cli/args.rs      # CLI definitions
-src/cli/output.rs    # Output formatting
-src/commands/*.rs    # Command handlers
-src/domain/*.rs      # Validated types (FanSpeed, Temperature, PowerLimit)
-src/services/*.rs    # Business logic
-src/nvml/traits.rs   # GpuDevice trait
-src/nvml/device.rs   # Real NVML impl
-src/mock.rs          # Test mocks
+```
+CLI (clap) → Commands → Services → NVML Abstraction → Hardware
+GUI (iced) → App State → Services → NVML Abstraction → Hardware
+```
+
+### CLI Structure (nvctl)
+
+```
+src/
+├── main.rs           # Entry point only
+├── lib.rs            # Library exports
+├── error.rs          # Error types (AppError, NvmlError, DomainError)
+├── cli/
+│   ├── args.rs       # CLI argument definitions
+│   └── output.rs     # Output formatting (table, JSON, compact)
+├── commands/         # Command handlers
+│   ├── mod.rs        # Command exports
+│   ├── list.rs       # List GPUs
+│   ├── info.rs       # GPU information
+│   ├── fan.rs        # Fan control
+│   ├── power.rs      # Power management
+│   ├── thermal.rs    # Thermal/acoustic control
+│   ├── control.rs    # Control loop daemon
+│   ├── health.rs     # Health monitoring
+│   ├── processes.rs  # Process listing
+│   └── alerts.rs     # Alert management
+├── domain/           # Validated domain types
+│   ├── mod.rs        # Type exports
+│   ├── fan.rs        # FanSpeed, FanPolicy, FanCurve
+│   ├── thermal.rs    # Temperature, ThermalThresholds
+│   ├── power.rs      # PowerLimit, PowerConstraints
+│   ├── performance.rs # ClockSpeed, Utilization, PerformanceState
+│   ├── memory.rs     # MemoryInfo, EccErrors
+│   ├── pcie.rs       # PcieMetrics, PcieLinkStatus
+│   ├── process.rs    # GpuProcess, ProcessType, ProcessList
+│   └── gpu.rs        # GpuInfo
+├── services/         # Business logic layer
+│   ├── mod.rs        # Service exports
+│   ├── fan_service.rs     # Fan control logic
+│   ├── power_service.rs   # Power management logic
+│   ├── monitor.rs         # GPU monitoring service
+│   └── alert_service.rs   # Alert processing
+├── health/           # Health scoring system
+│   ├── mod.rs        # Health score calculation
+│   └── scorer.rs     # Component health scoring
+├── alerts/           # Alert system
+│   ├── mod.rs        # Alert types and rules
+│   ├── config.rs     # Alert configuration
+│   └── daemon.rs     # Alert monitoring daemon
+├── nvml/             # NVML abstraction layer
+│   ├── traits.rs     # GpuDevice, GpuManager traits
+│   ├── device.rs     # Real NVML implementation (with C API bindings)
+│   └── wrapper.rs    # NVML initialization and manager
+├── config/           # Configuration system
+│   └── mod.rs        # TOML configuration
+└── mock.rs           # Test mocks (MockDevice, MockManager)
+```
+
+### GUI Structure (nvctl-gui)
+
+```
+nvctl-gui/src/
+├── main.rs           # Entry point
+├── app.rs            # Iced application (state, update, view)
+├── message.rs        # Message types for Elm architecture
+├── state.rs          # Application state management
+├── theme.rs          # Glossy theme colors, fonts, spacing
+├── views/            # Screen views (The Elm Architecture)
+│   ├── mod.rs        # View exports
+│   ├── dashboard.rs  # Dashboard view with all metrics
+│   ├── fan.rs        # Fan control view with curve editor
+│   ├── power.rs      # Power control view
+│   ├── thermal.rs    # Thermal control view
+│   ├── profiles.rs   # Profile management view
+│   └── settings.rs   # Settings view
+├── widgets/          # Custom canvas widgets
+│   ├── mod.rs        # Widget exports
+│   ├── temp_gauge.rs      # Temperature circular gauge
+│   ├── fan_gauge.rs       # Fan speed circular gauge
+│   ├── power_bar.rs       # Power usage circular gauge
+│   ├── util_gauge.rs      # Utilization circular gauge
+│   ├── health_gauge.rs    # Health score circular gauge
+│   ├── ecc_gauge.rs       # ECC error display
+│   ├── pcie_gauge.rs      # PCIe bandwidth gauge
+│   ├── mem_temp_gauge.rs  # Memory temperature gauge
+│   ├── video_gauge.rs     # Encoder/decoder gauge
+│   ├── vram_bar.rs        # VRAM usage bar
+│   ├── fan_curve.rs       # Interactive fan curve editor
+│   ├── multi_series_graph.rs  # Multi-series time series
+│   └── time_series.rs     # Single-series graphs
+└── services/         # GUI-specific services
+    ├── mod.rs        # Service exports
+    ├── gpu_monitor.rs     # Background GPU polling
+    ├── curve_daemon.rs    # Fan curve application
+    ├── profiles.rs        # Profile save/load
+    └── config.rs          # GUI configuration
 ```
 
 ---
@@ -157,21 +242,56 @@ Use extended thinking for architecture decisions: `think hard` or `ultrathink`
 - Entry point: `src/main.rs:1`
 - Error types: `src/error.rs:10` (AppError), `src/error.rs:50` (NvmlError)
 - CLI args: `src/cli/args.rs:14` (Cli struct)
+- Output formatting: `src/cli/output.rs` (TableDisplay, JSON, Compact)
 
 ### NVML Layer
 - GpuDevice trait: `src/nvml/traits.rs:16` (all GPU operations)
-- NVML implementation: `src/nvml/device.rs:23` (NvmlDevice)
+- NVML implementation: `src/nvml/device.rs:23` (NvmlDevice with C API bindings)
+- NVML manager: `src/nvml/wrapper.rs:1` (NvmlManager)
 - Mock device: `src/mock.rs:17` (MockDevice for tests)
 
 ### Domain Types
 - Fan: `src/domain/fan.rs:10` (FanSpeed, FanPolicy, FanCurve)
 - Thermal: `src/domain/thermal.rs:1` (Temperature, ThermalThresholds)
 - Power: `src/domain/power.rs:1` (PowerLimit, PowerConstraints)
-- Performance: `src/domain/performance.rs:1` (ClockSpeed, Utilization, MemoryInfo, PerformanceState)
+- Performance: `src/domain/performance.rs:1` (ClockSpeed, Utilization, PerformanceState)
+- Memory: `src/domain/memory.rs:1` (MemoryInfo, EccErrors)
+- PCIe: `src/domain/pcie.rs:1` (PcieMetrics, PcieLinkStatus)
+- Process: `src/domain/process.rs:1` (GpuProcess, ProcessType, ProcessList)
 - GPU Info: `src/domain/gpu.rs:1` (GpuInfo)
 
+### Commands
+- List: `src/commands/list.rs` (GPU listing)
+- Info: `src/commands/info.rs` (GPU information with all metrics)
+- Fan: `src/commands/fan.rs` (Fan control)
+- Power: `src/commands/power.rs` (Power management)
+- Thermal: `src/commands/thermal.rs` (Thermal control)
+- Control: `src/commands/control.rs` (Daemon mode)
+- Health: `src/commands/health.rs` (Health monitoring)
+- Processes: `src/commands/processes.rs` (Process listing)
+- Alerts: `src/commands/alerts.rs` (Alert management)
+
+### Services
+- Fan service: `src/services/fan_service.rs` (Fan control logic)
+- Power service: `src/services/power_service.rs` (Power management logic)
+- Monitor: `src/services/monitor.rs` (GPU monitoring)
+- Alert service: `src/services/alert_service.rs` (Alert processing)
+
+### Health & Alerts
+- Health module: `src/health/mod.rs` (HealthScore, component scoring)
+- Alert types: `src/alerts/mod.rs` (Alert, AlertRule, AlertLevel)
+- Alert config: `src/alerts/config.rs` (TOML configuration)
+- Alert daemon: `src/alerts/daemon.rs` (Background monitoring)
+
 ### Config
-- Config: `src/config/mod.rs:20` (Config struct)
+- Config: `src/config/mod.rs:20` (TOML configuration system)
+
+### GUI (nvctl-gui)
+- App: `nvctl-gui/src/app.rs` (Iced application state machine)
+- Messages: `nvctl-gui/src/message.rs` (Elm Architecture messages)
+- Theme: `nvctl-gui/src/theme.rs` (Colors, fonts, spacing constants)
+- Dashboard: `nvctl-gui/src/views/dashboard.rs` (Main dashboard view)
+- Widgets: `nvctl-gui/src/widgets/` (All custom canvas widgets)
 
 ---
 

@@ -17,8 +17,9 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# Documentation assets (keep README.md)
+# Documentation assets
 docs/
+README.md
 
 # Git internals
 .git/
