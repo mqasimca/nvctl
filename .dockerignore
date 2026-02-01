@@ -1,8 +1,12 @@
 # Build artifacts
-/target/
-/bin/
-/completions/
-/.cache/
+target/
+bin/
+.cache/
+completions/
+
+# Git
+.git/
+.gitignore
 
 # Editor/IDE
 .idea/
@@ -15,7 +19,11 @@
 .DS_Store
 Thumbs.db
 
+# Documentation
+docs/
+screenshots/
+*.md
+LICENSE
+
 # Project specific
 *plan
-
-docs/

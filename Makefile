@@ -1,7 +1,7 @@
 # nvctl Makefile
 # Build and development automation
 
-.PHONY: all build release debug install clean check test lint fmt doc help
+.PHONY: all build release debug build-docker docker-image install clean check test lint fmt doc help
 .PHONY: ci ci-quick ci-full run completions install-completions
 
 # Disable parallel execution to avoid cargo lock conflicts
@@ -12,6 +12,7 @@ BINARY := nvctl
 BIN_DIR := bin
 CARGO := cargo
 INSTALL_PATH := /usr/local/bin
+DOCKER_IMAGE := nvctl-builder
 
 # Default target
 all: build
@@ -36,6 +37,19 @@ debug:
 	$(CARGO) build
 	@cp target/debug/$(BINARY) $(BIN_DIR)/$(BINARY)-debug
 	@echo "Built: $(BIN_DIR)/$(BINARY)-debug"
+
+## Build Docker image with dependencies
+docker-image:
+	docker build -t $(DOCKER_IMAGE) .
+
+## Build release binary using Docker
+build-docker:
+	@mkdir -p .cache/registry .cache/git
+	docker run --rm --user $(shell id -u):$(shell id -g) \
+		-v $(shell pwd):/app \
+		-v $(shell pwd)/.cache/registry:/usr/local/cargo/registry \
+		-v $(shell pwd)/.cache/git:/usr/local/cargo/git \
+		-w /app $(DOCKER_IMAGE) make build
 
 ## Install binary to system (requires sudo)
 install: release
@@ -101,7 +115,7 @@ ci: ci-full
 # GUI Targets
 # =============================================================================
 
-.PHONY: gui gui-dev gui-check gui-test gui-build gui-clean
+.PHONY: gui gui-dev gui-check gui-test gui-build gui-build-docker gui-clean
 
 ## Run GUI in release mode (smooth animations)
 gui:
@@ -123,6 +137,17 @@ gui-test:
 ## Build GUI release binary
 gui-build:
 	cargo build --release --package nvctl-gui
+	@echo "Binary: target/release/nvctl-gui"
+
+## Build GUI release binary using Docker
+gui-build-docker:
+	@mkdir -p .cache/registry .cache/git
+	docker run --rm --user $(shell id -u):$(shell id -g) \
+		-v $(shell pwd):/app \
+		-v $(shell pwd)/.cache/registry:/usr/local/cargo/registry \
+		-v $(shell pwd)/.cache/git:/usr/local/cargo/git \
+		-w /app $(DOCKER_IMAGE) \
+		cargo build --release --package nvctl-gui
 	@echo "Binary: target/release/nvctl-gui"
 
 ## Clean GUI build artifacts
@@ -197,11 +222,13 @@ help:
 	@echo "Usage: make [target]"
 	@echo ""
 	@echo "Build:"
-	@echo "  build       Build release binary to bin/"
-	@echo "  release     Build optimized release binary"
-	@echo "  debug       Build debug binary"
-	@echo "  install     Install to $(INSTALL_PATH) (requires sudo)"
-	@echo "  clean       Remove build artifacts"
+	@echo "  build        Build release binary to bin/"
+	@echo "  release      Build optimized release binary"
+	@echo "  debug        Build debug binary"
+	@echo "  build-docker Build using Docker container"
+	@echo "  docker-image Build Docker image with dependencies"
+	@echo "  install      Install to $(INSTALL_PATH) (requires sudo)"
+	@echo "  clean        Remove build artifacts"
 	@echo ""
 	@echo "Quality:"
 	@echo "  check       Run all checks (fmt, lint, test)"
@@ -217,12 +244,13 @@ help:
 	@echo "  ci-full     Full CI pipeline"
 	@echo ""
 	@echo "GUI:"
-	@echo "  gui         Run GUI (release mode, smooth animations)"
-	@echo "  gui-dev     Run GUI (debug mode)"
-	@echo "  gui-check   Check GUI (fmt + clippy)"
-	@echo "  gui-test    Run GUI tests"
-	@echo "  gui-build   Build GUI release binary"
-	@echo "  gui-clean   Clean GUI build artifacts"
+	@echo "  gui              Run GUI (release mode, smooth animations)"
+	@echo "  gui-dev          Run GUI (debug mode)"
+	@echo "  gui-check        Check GUI (fmt + clippy)"
+	@echo "  gui-test         Run GUI tests"
+	@echo "  gui-build        Build GUI release binary"
+	@echo "  gui-build-docker Build GUI using Docker container"
+	@echo "  gui-clean        Clean GUI build artifacts"
 	@echo ""
 	@echo "Completions:"
 	@echo "  completions         Generate shell completions to completions/"
