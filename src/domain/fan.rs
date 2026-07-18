@@ -3,7 +3,7 @@
 //! Provides validated types for fan speed, curves, and policies.
 
 use crate::error::DomainError;
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use std::fmt;
 
 /// Fan speed percentage (0-100)
@@ -28,6 +28,13 @@ impl FanSpeed {
             return Err(DomainError::InvalidFanSpeed(value));
         }
         Ok(Self(value))
+    }
+
+    /// Create a fan speed by clamping the percentage to the valid range.
+    ///
+    /// Use [`FanSpeed::new`] when invalid input should be rejected instead.
+    pub const fn from_percentage_clamped(value: u8) -> Self {
+        Self(if value > Self::MAX { Self::MAX } else { value })
     }
 
     /// Create a FanSpeed without validation (for internal use)
@@ -96,7 +103,7 @@ impl FanCurvePoint {
 /// A fan curve defining speed based on temperature
 ///
 /// Points are sorted by temperature in ascending order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FanCurve {
     /// Curve points sorted by temperature
     points: Vec<FanCurvePoint>,
@@ -121,6 +128,26 @@ impl FanCurve {
 
         // Sort by temperature ascending
         points.sort_by_key(|p| p.temperature);
+
+        for pair in points.windows(2) {
+            if pair[0].temperature == pair[1].temperature {
+                return Err(DomainError::InvalidFanCurve(format!(
+                    "duplicate temperature point at {}°C",
+                    pair[0].temperature
+                )));
+            }
+            if pair[1].speed < pair[0].speed {
+                return Err(DomainError::InvalidFanCurve(
+                    "fan speed must not decrease as temperature rises".to_string(),
+                ));
+            }
+        }
+
+        if default_speed > points[0].speed {
+            return Err(DomainError::InvalidFanCurve(
+                "default speed must not exceed the first curve-point speed".to_string(),
+            ));
+        }
 
         Ok(Self {
             points,
@@ -169,6 +196,22 @@ impl FanCurve {
             ],
             default_speed: FanSpeed::new_unchecked(30),
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct FanCurveRepresentation {
+    points: Vec<FanCurvePoint>,
+    default_speed: FanSpeed,
+}
+
+impl<'de> Deserialize<'de> for FanCurve {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let representation = FanCurveRepresentation::deserialize(deserializer)?;
+        Self::new(representation.points, representation.default_speed).map_err(D::Error::custom)
     }
 }
 
@@ -319,6 +362,15 @@ mod tests {
     }
 
     #[test]
+    fn test_fan_speed_clamping_constructor() {
+        assert_eq!(FanSpeed::from_percentage_clamped(75).as_percentage(), 75);
+        assert_eq!(
+            FanSpeed::from_percentage_clamped(u8::MAX).as_percentage(),
+            100
+        );
+    }
+
+    #[test]
     fn test_fan_speed_display() {
         let speed = FanSpeed::new(75).unwrap();
         assert_eq!(speed.to_string(), "75%");
@@ -347,6 +399,33 @@ mod tests {
         let curve = FanCurve::new(points, FanSpeed::new_unchecked(20)).unwrap();
         let temps: Vec<_> = curve.points().iter().map(|p| p.temperature).collect();
         assert_eq!(temps, vec![40, 60, 80]);
+    }
+
+    #[test]
+    fn fan_curve_rejects_unsafe_or_ambiguous_steps() {
+        let decreasing = vec![
+            FanCurvePoint::new(40, FanSpeed::new_unchecked(70)),
+            FanCurvePoint::new(80, FanSpeed::new_unchecked(30)),
+        ];
+        assert!(FanCurve::new(decreasing, FanSpeed::new_unchecked(20)).is_err());
+
+        let duplicate = vec![
+            FanCurvePoint::new(60, FanSpeed::new_unchecked(40)),
+            FanCurvePoint::new(60, FanSpeed::new_unchecked(50)),
+        ];
+        assert!(FanCurve::new(duplicate, FanSpeed::new_unchecked(20)).is_err());
+
+        let points = vec![FanCurvePoint::new(40, FanSpeed::new_unchecked(30))];
+        assert!(FanCurve::new(points, FanSpeed::new_unchecked(50)).is_err());
+    }
+
+    #[test]
+    fn fan_curve_deserialization_preserves_invariants() {
+        let empty = r#"{"points":[],"default_speed":30}"#;
+        assert!(serde_json::from_str::<FanCurve>(empty).is_err());
+
+        let decreasing = r#"{"points":[{"temperature":40,"speed":80},{"temperature":80,"speed":20}],"default_speed":20}"#;
+        assert!(serde_json::from_str::<FanCurve>(decreasing).is_err());
     }
 
     #[test]

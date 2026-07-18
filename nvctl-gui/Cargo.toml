@@ -1,6 +1,6 @@
 [package]
 name = "nvctl-gui"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "GPU control GUI for nvctl using Iced"
 license = "MIT"
@@ -45,8 +45,3 @@ clap = { version = "4", features = ["derive"] }
 [dev-dependencies]
 tempfile = "3"
 nvctl = { path = "../", features = ["mock"] }
-
-[profile.release]
-lto = true
-codegen-units = 1
-strip = true

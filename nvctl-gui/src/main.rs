@@ -14,8 +14,9 @@ use app::NvctlGui;
 use clap::Parser;
 use fs2::FileExt;
 use iced::{window, Size};
-use std::fs::{self, File};
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::process;
 
 /// nvctl-gui - GPU Control Application
@@ -40,35 +41,44 @@ fn lock_file_path() -> PathBuf {
 }
 
 /// Try to acquire single-instance lock
-/// Returns the lock file handle if successful (must be kept alive)
-fn acquire_instance_lock() -> Option<File> {
-    let lock_path = lock_file_path();
-
+/// Returns `Ok(None)` only when another process owns the lock.
+fn acquire_instance_lock_at(lock_path: &Path) -> Result<Option<File>, String> {
     // Ensure parent directory exists
     if let Some(parent) = lock_path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create lock directory {}: {error}",
+                parent.display()
+            )
+        })?;
     }
 
-    // Open or create the lock file
-    let file = match File::create(&lock_path) {
-        Ok(f) => f,
-        Err(e) => {
-            log::error!("Failed to create lock file: {}", e);
-            return None;
-        }
-    };
+    // Do not truncate a lock file that another process may currently own.
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| format!("Failed to open lock file {}: {error}", lock_path.display()))?;
 
     // Try to acquire exclusive lock (non-blocking)
     match file.try_lock_exclusive() {
         Ok(()) => {
             log::debug!("Acquired instance lock at {:?}", lock_path);
-            Some(file)
+            Ok(Some(file))
         }
-        Err(_) => {
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
             log::info!("Another instance of nvctl-gui is already running");
-            None
+            Ok(None)
         }
+        Err(error) => Err(format!("Failed to lock {}: {error}", lock_path.display())),
     }
+}
+
+/// Try to acquire the process-wide single-instance lock.
+fn acquire_instance_lock() -> Result<Option<File>, String> {
+    acquire_instance_lock_at(&lock_file_path())
 }
 
 fn main() -> iced::Result {
@@ -87,9 +97,13 @@ fn main() -> iced::Result {
 
         // Check for existing daemon instance
         let _lock = match acquire_instance_lock() {
-            Some(lock) => lock,
-            None => {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
                 eprintln!("Another instance of nvctl-gui is already running.");
+                process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("Could not establish the daemon instance lock: {error}");
                 process::exit(1);
             }
         };
@@ -106,9 +120,13 @@ fn main() -> iced::Result {
 
     // Check for existing instance
     let _lock = match acquire_instance_lock() {
-        Some(lock) => lock,
-        None => {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
             eprintln!("nvctl-gui is already running. Only one instance allowed.");
+            process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("Could not establish the GUI instance lock: {error}");
             process::exit(1);
         }
     };
@@ -125,4 +143,20 @@ fn main() -> iced::Result {
         })
         .antialiasing(true)
         .run_with(NvctlGui::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_lock_distinguishes_contention_and_releases_on_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("gui.lock");
+
+        let first = acquire_instance_lock_at(&path).unwrap().unwrap();
+        assert!(acquire_instance_lock_at(&path).unwrap().is_none());
+        drop(first);
+        assert!(acquire_instance_lock_at(&path).unwrap().is_some());
+    }
 }

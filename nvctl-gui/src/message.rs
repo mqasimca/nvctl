@@ -37,6 +37,9 @@ pub enum Message {
     /// Periodic tick for GPU polling
     Tick(Instant),
 
+    /// Main application window opened.
+    WindowOpened(iced::window::Id),
+
     /// GPU state has been updated
     GpuStateUpdated(Box<GpuStateSnapshot>),
 
@@ -125,8 +128,8 @@ pub struct GpuStateSnapshot {
     pub temperature: Temperature,
     /// Fan speeds (one per fan)
     pub fan_speeds: Vec<FanSpeed>,
-    /// Fan policies (one per fan)
-    pub fan_policies: Vec<FanPolicy>,
+    /// Fan policies (one per fan), when the driver exposes them
+    pub fan_policies: Vec<Option<FanPolicy>>,
     /// Current power usage
     pub power_usage: PowerLimit,
     /// Current power limit
@@ -217,39 +220,30 @@ impl CurvePreset {
         let (points, default) = match self {
             CurvePreset::Silent => (
                 vec![
-                    FanCurvePoint::new(30, FanSpeed::new(20).unwrap_or(FanSpeed::new(20).unwrap())),
-                    FanCurvePoint::new(60, FanSpeed::new(30).unwrap_or(FanSpeed::new(30).unwrap())),
-                    FanCurvePoint::new(80, FanSpeed::new(60).unwrap_or(FanSpeed::new(60).unwrap())),
-                    FanCurvePoint::new(
-                        90,
-                        FanSpeed::new(100).unwrap_or(FanSpeed::new(100).unwrap()),
-                    ),
+                    FanCurvePoint::new(30, FanSpeed::from_percentage_clamped(20)),
+                    FanCurvePoint::new(60, FanSpeed::from_percentage_clamped(30)),
+                    FanCurvePoint::new(80, FanSpeed::from_percentage_clamped(60)),
+                    FanCurvePoint::new(90, FanSpeed::from_percentage_clamped(100)),
                 ],
-                FanSpeed::new(20).unwrap_or(FanSpeed::new(20).unwrap()),
+                FanSpeed::from_percentage_clamped(20),
             ),
             CurvePreset::Balanced => (
                 vec![
-                    FanCurvePoint::new(40, FanSpeed::new(30).unwrap_or(FanSpeed::new(30).unwrap())),
-                    FanCurvePoint::new(60, FanSpeed::new(50).unwrap_or(FanSpeed::new(50).unwrap())),
-                    FanCurvePoint::new(75, FanSpeed::new(80).unwrap_or(FanSpeed::new(80).unwrap())),
-                    FanCurvePoint::new(
-                        85,
-                        FanSpeed::new(100).unwrap_or(FanSpeed::new(100).unwrap()),
-                    ),
+                    FanCurvePoint::new(40, FanSpeed::from_percentage_clamped(30)),
+                    FanCurvePoint::new(60, FanSpeed::from_percentage_clamped(50)),
+                    FanCurvePoint::new(75, FanSpeed::from_percentage_clamped(80)),
+                    FanCurvePoint::new(85, FanSpeed::from_percentage_clamped(100)),
                 ],
-                FanSpeed::new(30).unwrap_or(FanSpeed::new(30).unwrap()),
+                FanSpeed::from_percentage_clamped(30),
             ),
             CurvePreset::Performance => (
                 vec![
-                    FanCurvePoint::new(30, FanSpeed::new(50).unwrap_or(FanSpeed::new(50).unwrap())),
-                    FanCurvePoint::new(50, FanSpeed::new(70).unwrap_or(FanSpeed::new(70).unwrap())),
-                    FanCurvePoint::new(70, FanSpeed::new(90).unwrap_or(FanSpeed::new(90).unwrap())),
-                    FanCurvePoint::new(
-                        80,
-                        FanSpeed::new(100).unwrap_or(FanSpeed::new(100).unwrap()),
-                    ),
+                    FanCurvePoint::new(30, FanSpeed::from_percentage_clamped(50)),
+                    FanCurvePoint::new(50, FanSpeed::from_percentage_clamped(70)),
+                    FanCurvePoint::new(70, FanSpeed::from_percentage_clamped(90)),
+                    FanCurvePoint::new(80, FanSpeed::from_percentage_clamped(100)),
                 ],
-                FanSpeed::new(50).unwrap_or(FanSpeed::new(50).unwrap()),
+                FanSpeed::from_percentage_clamped(50),
             ),
         };
 

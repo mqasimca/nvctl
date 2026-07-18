@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -67,17 +69,16 @@ jobs:
 
       - name: Build CLI (nvctl)
         run: |
-          cargo build --release --bin nvctl
+          cargo build --release --locked --bin nvctl
           strip target/release/nvctl
 
       - name: Build GUI (nvctl-gui)
         run: |
-          cargo build --release --bin nvctl-gui --package nvctl-gui
+          cargo build --release --locked --bin nvctl-gui --package nvctl-gui
           strip target/release/nvctl-gui
 
       - name: Run tests
-        run: cargo test --release
-        continue-on-error: true  # Tests may fail without actual NVIDIA GPU
+        run: cargo test --workspace --all-features --release --locked
 
       - name: Create archive
         run: |
@@ -169,6 +170,8 @@ jobs:
           echo '```bash' >> release_notes.md
           echo "# Download and extract" >> release_notes.md
           echo "wget https://github.com/$REPO_NAME/releases/download/$RELEASE_TAG/nvctl-linux-x86_64.tar.gz" >> release_notes.md
+          echo "wget https://github.com/$REPO_NAME/releases/download/$RELEASE_TAG/checksums.txt" >> release_notes.md
+          echo "sha256sum -c checksums.txt" >> release_notes.md
           echo "tar -xzf nvctl-linux-x86_64.tar.gz" >> release_notes.md
           echo "" >> release_notes.md
           echo "# Install to system" >> release_notes.md

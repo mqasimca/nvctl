@@ -34,66 +34,42 @@ impl NvmlManager {
 }
 
 impl GpuManager for NvmlManager {
-    type Device = NvmlDevice<'static>;
+    type Device<'manager> = NvmlDevice<'manager>;
 
     fn device_count(&self) -> Result<u32, NvmlError> {
-        self.nvml
-            .device_count()
-            .map_err(|e| NvmlError::Unknown(e.to_string()))
+        self.nvml.device_count().map_err(NvmlDevice::convert_error)
     }
 
-    fn device_by_index(&self, index: u32) -> Result<Self::Device, NvmlError> {
-        // SAFETY: We're extending the lifetime here which is safe because
-        // the NvmlDevice only lives as long as the NvmlManager.
-        // This is a limitation of the nvml-wrapper API design.
-        let nvml: &'static Nvml = unsafe { std::mem::transmute(&self.nvml) };
-
-        let device = nvml.device_by_index(index).map_err(|e| match e {
+    fn device_by_index(&self, index: u32) -> Result<Self::Device<'_>, NvmlError> {
+        let device = self.nvml.device_by_index(index).map_err(|e| match e {
             nvml_wrapper::error::NvmlError::NotFound => NvmlError::DeviceNotFound(index),
-            other => NvmlError::Unknown(other.to_string()),
+            other => NvmlDevice::convert_error(other),
         })?;
 
         Ok(NvmlDevice::new(device, index))
     }
 
-    fn device_by_uuid(&self, uuid: &str) -> Result<Self::Device, NvmlError> {
-        // SAFETY: Same as above
-        let nvml: &'static Nvml = unsafe { std::mem::transmute(&self.nvml) };
-
-        let device = nvml.device_by_uuid(uuid).map_err(|e| match e {
+    fn device_by_uuid(&self, uuid: &str) -> Result<Self::Device<'_>, NvmlError> {
+        let device = self.nvml.device_by_uuid(uuid).map_err(|e| match e {
             nvml_wrapper::error::NvmlError::NotFound => {
                 NvmlError::DeviceNotFoundByUuid(uuid.to_string())
             }
-            other => NvmlError::Unknown(other.to_string()),
+            other => NvmlDevice::convert_error(other),
         })?;
-
-        // Find the index by iterating through devices
-        let count = self.device_count()?;
-        let mut index = 0;
-        for i in 0..count {
-            if let Ok(d) = nvml.device_by_index(i) {
-                if let Ok(d_uuid) = d.uuid() {
-                    if d_uuid == uuid {
-                        index = i;
-                        break;
-                    }
-                }
-            }
-        }
+        let index = device.index().map_err(NvmlDevice::convert_error)?;
 
         Ok(NvmlDevice::new(device, index))
     }
 
-    fn device_by_name(&self, name: &str) -> Result<Self::Device, NvmlError> {
+    fn device_by_name(&self, name: &str) -> Result<Self::Device<'_>, NvmlError> {
         let count = self.device_count()?;
         let name_lower = name.to_lowercase();
 
         for i in 0..count {
             let device = self.device_by_index(i)?;
-            if let Ok(device_name) = device.name() {
-                if device_name.to_lowercase().contains(&name_lower) {
-                    return Ok(device);
-                }
+            let device_name = device.name()?;
+            if device_name.to_lowercase().contains(&name_lower) {
+                return Ok(device);
             }
         }
 
@@ -106,13 +82,13 @@ impl GpuManager for NvmlManager {
     fn driver_version(&self) -> Result<String, NvmlError> {
         self.nvml
             .sys_driver_version()
-            .map_err(|e| NvmlError::Unknown(e.to_string()))
+            .map_err(NvmlDevice::convert_error)
     }
 
     fn nvml_version(&self) -> Result<String, NvmlError> {
         self.nvml
             .sys_nvml_version()
-            .map_err(|e| NvmlError::Unknown(e.to_string()))
+            .map_err(NvmlDevice::convert_error)
     }
 }
 

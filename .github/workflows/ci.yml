@@ -63,20 +63,19 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Build CLI
-        run: cargo build --verbose --bin nvctl
+        run: cargo build --verbose --locked --bin nvctl
 
       - name: Build GUI
-        run: cargo build --verbose --bin nvctl-gui --package nvctl-gui
+        run: cargo build --verbose --locked --bin nvctl-gui --package nvctl-gui
 
       - name: Run tests
-        run: cargo test --verbose
-        continue-on-error: true  # Tests may fail without actual NVIDIA GPU
+        run: cargo test --workspace --all-features --locked --verbose
 
       - name: Build release (test)
-        run: cargo build --release
+        run: cargo build --workspace --release --locked
 
   build-docs:
     name: Build Documentation
@@ -105,7 +104,7 @@ jobs:
           sudo ln -sf /usr/lib/x86_64-linux-gnu/stubs/libnvidia-ml.so.1 /usr/lib/x86_64-linux-gnu/libnvidia-ml.so
 
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --workspace --no-deps --all-features --locked
 
       - name: Upload documentation
         uses: actions/upload-artifact@v4

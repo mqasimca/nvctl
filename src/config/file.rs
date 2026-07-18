@@ -15,48 +15,51 @@ impl ConfigFile {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Config, ConfigError> {
         let path = path.as_ref();
 
-        let content = std::fs::read_to_string(path)
-            .map_err(|_| ConfigError::FileNotFound(path.display().to_string()))?;
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ConfigError::FileNotFound(path.display().to_string())
+            } else {
+                ConfigError::ReadError {
+                    path: path.display().to_string(),
+                    message: error.to_string(),
+                }
+            }
+        })?;
 
         let config: Config = toml::from_str(&content)?;
+        config.validate()?;
         Ok(config)
     }
 
     /// Load configuration from default locations
-    pub fn load_default() -> Option<Config> {
+    pub fn load_default() -> Result<Option<Config>, ConfigError> {
         for path in Self::default_paths() {
             if path.exists() {
-                if let Ok(config) = Self::load(&path) {
-                    log::info!("Loaded config from {}", path.display());
-                    return Some(config);
-                }
+                let config = Self::load(&path)?;
+                log::info!("Loaded config from {}", path.display());
+                return Ok(Some(config));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Get default configuration file paths
     pub fn default_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // System-wide config
-        paths.push(PathBuf::from("/etc/nvctl/config.toml"));
+        // Project-local configuration has highest implicit precedence.
+        paths.push(PathBuf::from(".nvctl.toml"));
+        paths.push(PathBuf::from("nvctl.toml"));
 
-        // User config
-        if let Some(home) = dirs_path_home() {
-            paths.push(home.join(".config/nvctl/config.toml"));
+        // User configuration overrides the system default.
+        if let Some(config_dir) = dirs::config_dir() {
+            paths.push(config_dir.join("nvctl/config.toml"));
         }
 
-        // Current directory
-        paths.push(PathBuf::from("nvctl.toml"));
-        paths.push(PathBuf::from(".nvctl.toml"));
+        paths.push(PathBuf::from("/etc/nvctl/config.toml"));
 
         paths
     }
-}
-
-fn dirs_path_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -73,5 +76,12 @@ mod tests {
     fn test_load_missing_file() {
         let result = ConfigFile::load("/nonexistent/path/config.toml");
         assert!(matches!(result, Err(ConfigError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn unreadable_path_is_not_reported_as_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = ConfigFile::load(directory.path());
+        assert!(matches!(result, Err(ConfigError::ReadError { .. })));
     }
 }

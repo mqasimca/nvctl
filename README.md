@@ -3,7 +3,7 @@
 A fast, safe NVIDIA GPU control tool written in Rust. Manage fan speeds, power limits, and thermal settings via NVML.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 
 ## Features
 
@@ -38,7 +38,7 @@ A fast, safe NVIDIA GPU control tool written in Rust. Manage fan speeds, power l
 ### From Source
 
 ```bash
-git clone https://github.com/your-repo/nvctl.git
+git clone https://github.com/mqasimca/nvctl.git
 cd nvctl
 
 # Build CLI tool
@@ -112,9 +112,9 @@ nvctl-gui
   - Quick stats (clocks, VRAM, P-state)
 - **Fan Control** - Interactive fan curve editor with drag-and-drop points
 - **Power Control** - Slider-based power limit adjustment with constraints display
-- **Thermal Control** - Temperature threshold configuration
+- **Thermal Control** - Acoustic temperature-limit monitoring and adjustment on supported GPUs
 - **Profiles** - Save/load/delete configuration profiles
-- **Settings** - Refresh rate, theme preferences, and startup options
+- **Settings** - System information, keyboard shortcuts, and detected GPU status
 
 ### GUI Make Commands
 
@@ -144,7 +144,7 @@ Precise power limit control with visual feedback.
 ![Power Control](screenshots/power.png)
 
 ### Thermal Control
-Temperature threshold configuration.
+Acoustic temperature-limit monitoring and adjustment on supported GPUs.
 
 ![Thermal Control](screenshots/thermal.png)
 
@@ -154,7 +154,7 @@ Save and load GPU configuration profiles.
 ![Profiles](screenshots/profile.png)
 
 ### Settings
-Application preferences and refresh rate control.
+System information, shortcuts, detected GPUs, and the configured polling interval.
 
 ![Settings](screenshots/settings.png)
 
@@ -170,8 +170,8 @@ nvctl list --format json
 ### GPU Information
 
 ```bash
-nvctl info                    # Basic info
-nvctl info --all              # All details
+nvctl info                    # All available details (default)
+nvctl info --all              # Explicitly request all details
 nvctl info --fan              # Fan info only
 nvctl info --power            # Power info only
 nvctl info --thermal          # Thermal info only
@@ -193,7 +193,7 @@ nvctl fan status
 sudo nvctl fan policy manual   # Enable manual control
 sudo nvctl fan policy auto     # Return to automatic
 
-# Set fan speed (requires manual policy)
+# Set fan speed (switches the target fan to manual policy)
 sudo nvctl fan speed 50        # All fans to 50%
 sudo nvctl fan speed 80 --fan-index 0  # Specific fan
 
@@ -267,7 +267,7 @@ nvctl processes --sort-pid
 # Filter by process type
 nvctl processes --process-type graphics
 nvctl processes --process-type compute
-nvctl processes --process-type both
+nvctl processes --process-type both  # Hybrid graphics+compute processes
 
 # JSON output
 nvctl processes --format json
@@ -290,16 +290,16 @@ nvctl alerts rules
 nvctl alerts list
 
 # Start alert monitoring daemon
-sudo nvctl alerts start
+nvctl alerts start
 
 # Stop alert daemon
-sudo nvctl alerts stop
+nvctl alerts stop
 
 # Acknowledge an alert
 nvctl alerts ack <alert-id>
 
-# Silence an alert temporarily
-nvctl alerts silence <alert-id> --duration 1h
+# Silence an alert
+nvctl alerts silence <alert-id>
 
 # Clear resolved alerts
 nvctl alerts clear
@@ -424,44 +424,39 @@ nvctl control
 
 ### Table (default)
 
-```
-GPU 0: NVIDIA GeForce RTX 4090
-  Temperature: 45°C
-  Fan Speed: 35% (Auto)
-  Power: 85W / 450W
+```bash
+nvctl info --power
 ```
 
 ### JSON
 
 ```bash
-nvctl info --format json
+nvctl info --power --format json
 ```
 
 ```json
 {
-  "index": 0,
-  "name": "NVIDIA GeForce RTX 4090",
-  "temperature": 45,
-  "fan_speed": 35,
-  "fan_policy": "auto",
-  "power_usage": 85,
-  "power_limit": 450
+  "gpu_name": "NVIDIA GeForce RTX 4090",
+  "gpu_index": 0,
+  "current_usage_watts": 85,
+  "limit_watts": 450,
+  "min_limit_watts": 150,
+  "max_limit_watts": 600,
+  "default_limit_watts": 450
 }
 ```
+
+Commands that produce multiple records emit one JSON array, so stdout always contains one valid JSON document.
 
 ### Compact
 
 ```bash
-nvctl info --format compact
-```
-
-```
-GPU0: 45°C 35% 85W/450W
+nvctl info --power --format compact
 ```
 
 ## Permissions
 
-Most read operations work without root. Write operations require root:
+Read operations and the alert daemon normally run as the current user. Depending on the driver and system policy, GPU mutation commands may require elevated privileges:
 
 ```bash
 # Works without sudo
@@ -474,23 +469,14 @@ nvctl processes
 nvctl alerts list
 nvctl alerts rules
 
-# Requires sudo
+# May require sudo
 sudo nvctl fan policy manual
 sudo nvctl fan speed 75
 sudo nvctl power limit 250
 sudo nvctl thermal limit 80
-sudo nvctl alerts start
-sudo nvctl alerts stop
 ```
 
-For non-root access, add a udev rule:
-
-```bash
-# /etc/udev/rules.d/99-nvidia.rules
-KERNEL=="nvidia[0-9]*", MODE="0666"
-```
-
-Then reload: `sudo udevadm control --reload-rules && sudo udevadm trigger`
+For non-root mutation access, use an administrator-defined, least-privilege device or service policy appropriate for your distribution. Avoid world-writable NVIDIA device nodes.
 
 ## Troubleshooting
 
@@ -517,7 +503,7 @@ sudo dnf install nvidia-driver-libs
 
 ### "Insufficient permissions"
 
-Use sudo or configure udev rules (see Permissions section).
+Use sudo for the individual mutation command, or ask an administrator to configure a least-privilege policy (see Permissions).
 
 ### "Fan control not available"
 

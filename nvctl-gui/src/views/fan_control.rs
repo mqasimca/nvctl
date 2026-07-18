@@ -124,14 +124,16 @@ fn view_fan_status<'a>(gpu: &'a GpuState, config: &'a GuiConfig) -> Element<'a, 
         .iter()
         .enumerate()
         .map(|(i, speed)| {
-            let policy = gpu.fan_policies.get(i).copied().unwrap_or(FanPolicy::Auto);
+            let policy = gpu.fan_policies.get(i).copied().flatten();
             let policy_text = match policy {
-                FanPolicy::Auto => "Auto",
-                FanPolicy::Manual => "Manual",
+                Some(FanPolicy::Auto) => "Auto",
+                Some(FanPolicy::Manual) => "Manual",
+                None => "Unavailable",
             };
             let policy_color = match policy {
-                FanPolicy::Auto => colors::ACCENT_GREEN,
-                FanPolicy::Manual => colors::ACCENT_ORANGE,
+                Some(FanPolicy::Auto) => colors::ACCENT_GREEN,
+                Some(FanPolicy::Manual) => colors::ACCENT_ORANGE,
+                None => colors::TEXT_MUTED,
             };
 
             let speed_pct = speed.as_percentage();
@@ -198,19 +200,20 @@ fn view_policy_controls<'a>(gpu: &'a GpuState, config: &'a GuiConfig) -> Element
     let fan_config = config.gpu_fan_config(&gpu.info.uuid);
 
     let fans: Vec<Element<'a, Message>> = gpu
-        .fan_policies
+        .fan_speeds
         .iter()
         .enumerate()
-        .map(|(i, policy)| {
+        .map(|(i, _)| {
             let fan_idx = i as u32;
+            let policy = gpu.fan_policies.get(i).copied().flatten();
 
-            let auto_style = if *policy == FanPolicy::Auto {
+            let auto_style = if policy == Some(FanPolicy::Auto) {
                 active_button_style
             } else {
                 inactive_button_style
             };
 
-            let manual_style = if *policy == FanPolicy::Manual {
+            let manual_style = if policy == Some(FanPolicy::Manual) {
                 active_button_style
             } else {
                 inactive_button_style
@@ -220,6 +223,21 @@ fn view_policy_controls<'a>(gpu: &'a GpuState, config: &'a GuiConfig) -> Element
             let fan_name = fan_config
                 .map(|fc| fc.get_fan_name(i as u32, None))
                 .unwrap_or_else(|| format!("Fan {}", i + 1));
+
+            if policy.is_none() {
+                return row![
+                    text(format!("{}:", fan_name))
+                        .size(font_size::BASE)
+                        .color(colors::TEXT_SECONDARY),
+                    horizontal_space(),
+                    text("Policy control unavailable")
+                        .size(font_size::SM)
+                        .color(colors::TEXT_MUTED),
+                ]
+                .align_y(Alignment::Center)
+                .spacing(spacing::SM)
+                .into();
+            }
 
             row![
                 text(format!("{}:", fan_name))
@@ -270,7 +288,7 @@ fn view_manual_controls<'a>(gpu: &'a GpuState, config: &'a GuiConfig) -> Element
         .size(font_size::LG)
         .color(colors::TEXT_PRIMARY);
 
-    let has_manual = gpu.fan_policies.contains(&FanPolicy::Manual);
+    let has_manual = gpu.fan_policies.contains(&Some(FanPolicy::Manual));
 
     if !has_manual {
         return container(
@@ -306,7 +324,7 @@ fn view_manual_controls<'a>(gpu: &'a GpuState, config: &'a GuiConfig) -> Element
         .filter(|(i, _)| {
             gpu.fan_policies
                 .get(*i)
-                .is_some_and(|p| *p == FanPolicy::Manual)
+                .is_some_and(|policy| *policy == Some(FanPolicy::Manual))
         })
         .map(|(i, speed)| {
             let fan_idx = i as u32;

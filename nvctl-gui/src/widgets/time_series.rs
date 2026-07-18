@@ -26,13 +26,15 @@ pub struct TimeSeriesGraph<'a> {
 impl<'a> TimeSeriesGraph<'a> {
     /// Create a new time series graph
     pub fn new(data: &'a VecDeque<f32>, label: &'a str, unit: &'a str) -> Self {
-        let (min, max) = if data.is_empty() {
-            (0.0, 100.0)
-        } else {
-            let min = data.iter().copied().fold(f32::INFINITY, f32::min);
-            let max = data.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut finite_values = data.iter().copied().filter(|value| value.is_finite());
+        let (min, max) = if let Some(first) = finite_values.next() {
+            let (min, max) = finite_values.fold((first, first), |(min, max), value| {
+                (min.min(value), max.max(value))
+            });
             let range = (max - min).max(1.0);
             (min - range * 0.1, max + range * 0.1)
+        } else {
+            (0.0, 100.0)
         };
 
         Self {
@@ -54,15 +56,25 @@ impl<'a> TimeSeriesGraph<'a> {
 
     /// Set the value range
     pub fn range(mut self, min: f32, max: f32) -> Self {
-        self.min_value = min;
-        self.max_value = max;
+        if min.is_finite() && max.is_finite() && max > min {
+            self.min_value = min;
+            self.max_value = max;
+        }
         self
     }
 
     /// Set the number of horizontal grid lines
     pub fn grid_lines(mut self, count: u8) -> Self {
-        self.grid_lines = count;
+        self.grid_lines = count.max(1);
         self
+    }
+
+    fn normalize(&self, value: f32) -> f32 {
+        let range = self.max_value - self.min_value;
+        if !value.is_finite() || !range.is_finite() || range <= 0.0 {
+            return 0.0;
+        }
+        ((value - self.min_value) / range).clamp(0.0, 1.0)
     }
 }
 
@@ -101,7 +113,13 @@ impl canvas::Program<Message> for TimeSeriesGraph<'_> {
             ..Text::default()
         });
 
-        if let Some(&current) = self.data.back() {
+        if let Some(current) = self
+            .data
+            .iter()
+            .rev()
+            .copied()
+            .find(|value| value.is_finite())
+        {
             let value_text = format!("{:.0}{}", current, self.unit);
             frame.fill_text(Text {
                 content: value_text,
@@ -112,6 +130,10 @@ impl canvas::Program<Message> for TimeSeriesGraph<'_> {
                 vertical_alignment: Vertical::Center,
                 ..Text::default()
             });
+        }
+
+        if graph_width <= 0.0 || graph_height <= 0.0 {
+            return vec![frame.into_geometry()];
         }
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -169,7 +191,7 @@ impl canvas::Program<Message> for TimeSeriesGraph<'_> {
 
                 for (i, &value) in self.data.iter().enumerate() {
                     let x = margin_left + i as f32 * x_step;
-                    let normalized = (value - self.min_value) / value_range;
+                    let normalized = self.normalize(value);
                     let y = margin_top + graph_height * (1.0 - normalized.clamp(0.0, 1.0));
                     builder.line_to(Point::new(x, y));
                 }
@@ -189,7 +211,7 @@ impl canvas::Program<Message> for TimeSeriesGraph<'_> {
 
                 for (i, &value) in self.data.iter().enumerate() {
                     let x = margin_left + i as f32 * x_step;
-                    let normalized = (value - self.min_value) / value_range;
+                    let normalized = self.normalize(value);
                     let y = margin_top + graph_height * (1.0 - normalized.clamp(0.0, 1.0));
                     let clamped_y = y.max(threshold_y);
                     builder.line_to(Point::new(x, clamped_y));
@@ -205,7 +227,7 @@ impl canvas::Program<Message> for TimeSeriesGraph<'_> {
             let line = Path::new(|builder| {
                 for (i, &value) in self.data.iter().enumerate() {
                     let x = margin_left + i as f32 * x_step;
-                    let normalized = (value - self.min_value) / value_range;
+                    let normalized = self.normalize(value);
                     let y = margin_top + graph_height * (1.0 - normalized.clamp(0.0, 1.0));
 
                     if i == 0 {
@@ -249,9 +271,15 @@ impl canvas::Program<Message> for TimeSeriesGraph<'_> {
             // ═══════════════════════════════════════════════════════════════════════
             // CURRENT VALUE MARKER - Glowing dot at the end
             // ═══════════════════════════════════════════════════════════════════════
-            if let Some(&current) = self.data.back() {
+            if let Some(current) = self
+                .data
+                .iter()
+                .rev()
+                .copied()
+                .find(|value| value.is_finite())
+            {
                 let x = margin_left + (points - 1) as f32 * x_step;
-                let normalized = (current - self.min_value) / value_range;
+                let normalized = self.normalize(current);
                 let y = margin_top + graph_height * (1.0 - normalized.clamp(0.0, 1.0));
 
                 // Outer glow
@@ -376,6 +404,28 @@ mod tests {
         let graph = TimeSeriesGraph::new(&data, "Test", "").range(0.0, 200.0);
         assert_eq!(graph.min_value, 0.0);
         assert_eq!(graph.max_value, 200.0);
+    }
+
+    #[test]
+    fn invalid_ranges_and_zero_grid_lines_are_normalized() {
+        let data = VecDeque::from([50.0, 55.0]);
+        let original = TimeSeriesGraph::new(&data, "Test", "");
+        let original_range = (original.min_value, original.max_value);
+        let graph = original.range(10.0, 10.0).grid_lines(0);
+
+        assert_eq!((graph.min_value, graph.max_value), original_range);
+        assert_eq!(graph.grid_lines, 1);
+        assert!(graph.normalize(f32::NAN).is_finite());
+    }
+
+    #[test]
+    fn non_finite_data_does_not_poison_the_automatic_range() {
+        let data = VecDeque::from([f32::NAN, 40.0, f32::INFINITY, 60.0]);
+        let graph = TimeSeriesGraph::new(&data, "Test", "");
+
+        assert!(graph.min_value.is_finite());
+        assert!(graph.max_value.is_finite());
+        assert!(graph.max_value > graph.min_value);
     }
 
     #[test]

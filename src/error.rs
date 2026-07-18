@@ -61,7 +61,7 @@ pub enum NvmlError {
     NotSupported(String),
 
     /// Insufficient permissions
-    #[error("Insufficient permissions: {0}. Try running with sudo.")]
+    #[error("Insufficient permissions: {0}")]
     InsufficientPermissions(String),
 
     /// Unknown NVML error
@@ -119,6 +119,10 @@ pub enum ConfigError {
     /// Config file not found
     #[error("Configuration file not found: {0}")]
     FileNotFound(String),
+
+    /// Config file exists but could not be read
+    #[error("Failed to read configuration file '{path}': {message}")]
+    ReadError { path: String, message: String },
 
     /// Failed to parse config file
     #[error("Failed to parse configuration: {0}")]

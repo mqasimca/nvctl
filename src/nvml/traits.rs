@@ -39,14 +39,14 @@ pub trait GpuDevice: Send + Sync {
 
     /// Get all temperature readings (GPU and memory)
     fn temperature_readings(&self) -> Result<Vec<TemperatureReading>, NvmlError> {
-        let mut readings = vec![];
+        let mut readings = vec![TemperatureReading::gpu(self.temperature()?)];
 
-        if let Ok(temp) = self.temperature() {
-            readings.push(TemperatureReading::gpu(temp));
-        }
-
-        if let Ok(Some(mem_temp)) = self.memory_temperature() {
-            readings.push(TemperatureReading::memory(mem_temp));
+        match self.memory_temperature() {
+            Ok(Some(memory_temperature)) => {
+                readings.push(TemperatureReading::memory(memory_temperature));
+            }
+            Ok(None) | Err(NvmlError::NotSupported(_)) => {}
+            Err(error) => return Err(error),
         }
 
         Ok(readings)
@@ -153,23 +153,28 @@ pub trait GpuDevice: Send + Sync {
 ///
 /// This trait provides methods for discovering and accessing GPU devices.
 pub trait GpuManager: Send + Sync {
-    /// The device type returned by this manager
-    type Device: GpuDevice;
+    /// The device type returned by this manager.
+    ///
+    /// Real NVML devices borrow the manager that owns the loaded NVML library,
+    /// so the returned device must not outlive `self`.
+    type Device<'manager>: GpuDevice
+    where
+        Self: 'manager;
 
     /// Get the number of GPU devices
     fn device_count(&self) -> Result<u32, NvmlError>;
 
     /// Get a device by index
-    fn device_by_index(&self, index: u32) -> Result<Self::Device, NvmlError>;
+    fn device_by_index(&self, index: u32) -> Result<Self::Device<'_>, NvmlError>;
 
     /// Get a device by UUID
-    fn device_by_uuid(&self, uuid: &str) -> Result<Self::Device, NvmlError>;
+    fn device_by_uuid(&self, uuid: &str) -> Result<Self::Device<'_>, NvmlError>;
 
     /// Get a device by name (partial match)
-    fn device_by_name(&self, name: &str) -> Result<Self::Device, NvmlError>;
+    fn device_by_name(&self, name: &str) -> Result<Self::Device<'_>, NvmlError>;
 
     /// Get all devices
-    fn all_devices(&self) -> Result<Vec<Self::Device>, NvmlError> {
+    fn all_devices(&self) -> Result<Vec<Self::Device<'_>>, NvmlError> {
         let count = self.device_count()?;
         let mut devices = Vec::with_capacity(count as usize);
         for i in 0..count {

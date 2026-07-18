@@ -8,8 +8,7 @@ use crate::message::GpuStateSnapshot;
 use crate::state::GpuState;
 
 use nvctl::domain::{
-    ClockSpeed, ClockType, CoolerTarget, FanPolicy, FanSpeed, MemoryInfo, PerformanceState,
-    PowerLimit, Temperature, Utilization,
+    AcousticLimits, ClockType, CoolerTarget, FanPolicy, FanSpeed, PowerLimit, Temperature,
 };
 use nvctl::error::NvmlError;
 use nvctl::nvml::traits::{GpuDevice, GpuManager};
@@ -39,133 +38,168 @@ impl GpuMonitor {
             return Vec::new();
         };
 
-        let devices = match manager.all_devices() {
-            Ok(devices) => devices,
-            Err(_) => return Vec::new(),
+        let device_count = match manager.device_count() {
+            Ok(count) => count,
+            Err(error) => {
+                log::warn!("Failed to enumerate GPUs: {}", error);
+                return Vec::new();
+            }
         };
 
         // Get driver version once for all GPUs
         let driver_version = manager.driver_version().ok();
 
-        devices
-            .into_iter()
-            .filter_map(|device| {
-                let mut info = device.info().ok()?;
+        (0..device_count)
+            .filter_map(|index| {
+                let device = match manager.device_by_index(index) {
+                    Ok(device) => device,
+                    Err(error) => {
+                        log::warn!("Skipping GPU {index}: failed to open device: {error}");
+                        return None;
+                    }
+                };
+                let state = (|| -> Result<GpuState, String> {
+                    let mut info = device.info().map_err(|error| error.to_string())?;
+                    if let Some(ref version) = driver_version {
+                        info = info.with_driver_version(version.clone());
+                    }
 
-                // Set driver version on GPU info
-                if let Some(ref version) = driver_version {
-                    info = info.with_driver_version(version.clone());
-                }
+                    let mut state = GpuState::new(info);
+                    state.thresholds = device
+                        .thermal_thresholds()
+                        .map_err(|error| error.to_string())?;
+                    state.power_constraints = match device.power_constraints() {
+                        Ok(constraints) => Some(constraints),
+                        Err(NvmlError::NotSupported(_)) => None,
+                        Err(error) => return Err(error.to_string()),
+                    };
+                    let snapshot = self.poll_device(&device)?;
+                    state.update_from_snapshot(snapshot);
 
-                let mut state = GpuState::new(info);
+                    Ok(state)
+                })();
 
-                // Populate initial state
-                if let Ok(temp) = device.temperature() {
-                    state.temperature = temp;
-                }
-                if let Ok(thresholds) = device.thermal_thresholds() {
-                    state.thresholds = thresholds;
-                }
-                if let Ok(power_limit) = device.power_limit() {
-                    state.power_limit = power_limit;
-                }
-                if let Ok(power_usage) = device.power_usage() {
-                    state.power_usage = power_usage;
-                }
-                if let Ok(constraints) = device.power_constraints() {
-                    state.power_constraints = Some(constraints);
-                }
-
-                // Get fan info
-                if let Ok(fan_count) = device.fan_count() {
-                    for i in 0..fan_count {
-                        if let Ok(speed) = device.fan_speed(i) {
-                            state.fan_speeds.push(speed);
-                        }
-                        if let Ok(policy) = device.fan_policy(i) {
-                            state.fan_policies.push(policy);
-                        }
+                match state {
+                    Ok(state) => Some(state),
+                    Err(error) => {
+                        log::warn!("Skipping GPU with incomplete initial telemetry: {}", error);
+                        None
                     }
                 }
-
-                Some(state)
             })
             .collect()
     }
 
     /// Poll current state for a GPU
-    pub fn poll_gpu(&self, index: u32) -> Option<GpuStateSnapshot> {
-        let manager = self.manager.as_ref()?;
-        let device = manager.device_by_index(index).ok()?;
+    pub fn poll_gpu(&self, index: u32) -> Result<GpuStateSnapshot, String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let device = manager
+            .device_by_index(index)
+            .map_err(|error| format!("Failed to open GPU {index}: {error}"))?;
 
-        let name = device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
-        let temperature = device.temperature().unwrap_or(Temperature::new(0));
-        let power_usage = device.power_usage().unwrap_or(PowerLimit::from_watts(0));
-        let power_limit = device.power_limit().unwrap_or(PowerLimit::from_watts(0));
+        self.poll_device(&device)
+    }
 
-        // Get clock speeds
+    /// Poll a physical GPU by its stable UUID.
+    pub fn poll_gpu_by_uuid(&self, gpu_uuid: &str) -> Result<GpuStateSnapshot, String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let device = manager
+            .device_by_uuid(gpu_uuid)
+            .map_err(|error| format!("Failed to open GPU {gpu_uuid}: {error}"))?;
+
+        self.poll_device(&device)
+    }
+
+    fn poll_device<D: GpuDevice>(&self, device: &D) -> Result<GpuStateSnapshot, String> {
+        let index = device.index();
+
+        let metric_error = |metric: &str, error: NvmlError| {
+            format!("Failed to read {metric} for GPU {index}: {error}")
+        };
+        let name = device.name().map_err(|error| metric_error("name", error))?;
+        let temperature = device
+            .temperature()
+            .map_err(|error| metric_error("temperature", error))?;
+        let power_usage = device
+            .power_usage()
+            .map_err(|error| metric_error("power usage", error))?;
+        let power_limit = device
+            .power_limit()
+            .map_err(|error| metric_error("power limit", error))?;
         let gpu_clock = device
             .clock_speed(ClockType::Graphics)
-            .unwrap_or(ClockSpeed::default());
+            .map_err(|error| metric_error("graphics clock", error))?;
         let mem_clock = device
             .clock_speed(ClockType::Memory)
-            .unwrap_or(ClockSpeed::default());
-
-        // Get utilization
-        let utilization = device.utilization().unwrap_or(Utilization::default());
-
-        // Get memory info
-        let memory_info = device.memory_info().unwrap_or(MemoryInfo::default());
-
-        // Get performance state
+            .map_err(|error| metric_error("memory clock", error))?;
+        let utilization = device
+            .utilization()
+            .map_err(|error| metric_error("utilization", error))?;
+        let memory_info = device
+            .memory_info()
+            .map_err(|error| metric_error("memory usage", error))?;
         let perf_state = device
             .performance_state()
-            .unwrap_or(PerformanceState::default());
+            .map_err(|error| metric_error("performance state", error))?;
 
         let mut fan_speeds = Vec::new();
         let mut fan_policies = Vec::new();
 
-        if let Ok(fan_count) = device.fan_count() {
-            for i in 0..fan_count {
-                if let Ok(speed) = device.fan_speed(i) {
-                    fan_speeds.push(speed);
-                }
-                if let Ok(policy) = device.fan_policy(i) {
-                    fan_policies.push(policy);
-                }
-            }
+        let fan_count = device
+            .fan_count()
+            .map_err(|error| metric_error("fan count", error))?;
+        for i in 0..fan_count {
+            fan_speeds.push(
+                device
+                    .fan_speed(i)
+                    .map_err(|error| metric_error(&format!("fan {i} speed"), error))?,
+            );
+            fan_policies.push(match device.fan_policy(i) {
+                Ok(policy) => Some(policy),
+                Err(NvmlError::NotSupported(_)) => None,
+                Err(error) => return Err(metric_error(&format!("fan {i} policy"), error)),
+            });
         }
 
-        // Get Phase 1 metrics
-        let memory_temperature = device.memory_temperature().ok().flatten();
-        let ecc_errors = device.ecc_errors().ok().flatten();
-        let pcie_metrics = device.pcie_metrics().ok();
-        let encoder_util = device.encoder_utilization().ok().flatten();
-        let decoder_util = device.decoder_utilization().ok().flatten();
+        // Unsupported optional metrics remain absent; operational failures abort the snapshot.
+        let memory_temperature =
+            Self::optional_metric(device.memory_temperature(), "memory temperature", index)?
+                .flatten();
+        let ecc_errors = Self::optional_metric(device.ecc_errors(), "ECC errors", index)?.flatten();
+        let pcie_metrics = Self::optional_metric(device.pcie_metrics(), "PCIe metrics", index)?;
+        let encoder_util =
+            Self::optional_metric(device.encoder_utilization(), "encoder utilization", index)?
+                .flatten();
+        let decoder_util =
+            Self::optional_metric(device.decoder_utilization(), "decoder utilization", index)?
+                .flatten();
+        let throttle_reasons =
+            Self::optional_metric(device.throttle_reasons(), "throttle reasons", index)?;
 
         // Calculate health score
-        let health_score = if let Ok(thresholds) = device.thermal_thresholds() {
-            let _power_constraints = device.power_constraints().ok();
+        let health_score = if let Some(throttle_reasons) = throttle_reasons {
+            let thresholds = device
+                .thermal_thresholds()
+                .map_err(|error| metric_error("thermal thresholds", error))?;
 
-            // Determine throttling status
-            let is_thermal_throttling = if let Some(slowdown) = thresholds.slowdown {
-                temperature.as_celsius() >= slowdown.as_celsius()
-            } else {
-                false
-            };
-
+            let is_thermal_throttling = throttle_reasons.sw_thermal || throttle_reasons.hw_thermal;
             let is_power_throttling =
-                power_usage.as_watts() as f64 >= power_limit.as_watts() as f64 * 0.99;
+                throttle_reasons.sw_power_cap || throttle_reasons.hw_power_brake;
 
             // Calculate VRAM usage ratio
             let vram_usage_ratio = if memory_info.total > 0 {
-                Some(memory_info.used as f64 / memory_info.total as f64)
+                Some((memory_info.used as f64 / memory_info.total as f64).clamp(0.0, 1.0))
             } else {
                 None
             };
 
-            // Use uptime estimate of 1 hour for ECC error rate
-            let uptime_seconds = 3600;
+            let uptime_seconds = nvctl::health::system_uptime_seconds().unwrap_or(0);
 
             // Build health params
             let params = nvctl::health::HealthParams {
@@ -190,7 +224,7 @@ impl GpuMonitor {
             None
         };
 
-        Some(GpuStateSnapshot {
+        Ok(GpuStateSnapshot {
             index,
             name,
             temperature,
@@ -213,31 +247,115 @@ impl GpuMonitor {
         })
     }
 
+    /// Poll only the safety-critical values needed by fan curve control.
+    pub fn poll_fan_control(
+        &self,
+        gpu_index: u32,
+        fan_index: u32,
+    ) -> Result<(nvctl::domain::Temperature, FanSpeed, FanPolicy), String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let device = manager
+            .device_by_index(gpu_index)
+            .map_err(|error| format!("Failed to open GPU {gpu_index}: {error}"))?;
+        let fan_count = device
+            .fan_count()
+            .map_err(|error| format!("Failed to read GPU {gpu_index} fan count: {error}"))?;
+        if fan_index >= fan_count {
+            return Err(format!(
+                "Fan {fan_index} is out of range for GPU {gpu_index} ({fan_count} fans)"
+            ));
+        }
+
+        let temperature = device
+            .temperature()
+            .map_err(|error| format!("Failed to read GPU {gpu_index} temperature: {error}"))?;
+        let speed = device.fan_speed(fan_index).map_err(|error| {
+            format!("Failed to read GPU {gpu_index} Fan {fan_index} speed: {error}")
+        })?;
+        let policy = device.fan_policy(fan_index).map_err(|error| {
+            format!("Failed to read GPU {gpu_index} Fan {fan_index} policy: {error}")
+        })?;
+        Ok((temperature, speed, policy))
+    }
+
+    /// Poll the safety-critical fan values using a stable GPU UUID.
+    pub fn poll_fan_control_by_uuid(
+        &self,
+        gpu_uuid: &str,
+        fan_index: u32,
+    ) -> Result<(nvctl::domain::Temperature, FanSpeed, FanPolicy), String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let device = manager
+            .device_by_uuid(gpu_uuid)
+            .map_err(|error| format!("Failed to open GPU {gpu_uuid}: {error}"))?;
+        let fan_count = device
+            .fan_count()
+            .map_err(|error| format!("Failed to read GPU {gpu_uuid} fan count: {error}"))?;
+        if fan_index >= fan_count {
+            return Err(format!(
+                "Fan {fan_index} is out of range for GPU {gpu_uuid} ({fan_count} fans)"
+            ));
+        }
+
+        let temperature = device
+            .temperature()
+            .map_err(|error| format!("Failed to read GPU {gpu_uuid} temperature: {error}"))?;
+        let speed = device.fan_speed(fan_index).map_err(|error| {
+            format!("Failed to read GPU {gpu_uuid} Fan {fan_index} speed: {error}")
+        })?;
+        let policy = device.fan_policy(fan_index).map_err(|error| {
+            format!("Failed to read GPU {gpu_uuid} Fan {fan_index} policy: {error}")
+        })?;
+        Ok((temperature, speed, policy))
+    }
+
+    fn optional_metric<T>(
+        result: Result<T, NvmlError>,
+        metric: &str,
+        gpu_index: u32,
+    ) -> Result<Option<T>, String> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(NvmlError::NotSupported(_)) => Ok(None),
+            Err(error) => Err(format!(
+                "Failed to read {metric} for GPU {gpu_index}: {error}"
+            )),
+        }
+    }
+
     /// Get driver version
     pub fn driver_version(&self) -> Option<String> {
         self.manager.as_ref()?.driver_version().ok()
     }
 
     /// Get cooler targets for all fans on a GPU
-    pub fn get_cooler_targets(&self, index: u32) -> Vec<CoolerTarget> {
+    pub fn get_cooler_targets(&self, index: u32) -> Result<Vec<CoolerTarget>, String> {
         let Some(ref manager) = self.manager else {
-            return Vec::new();
+            return Err("NVML not available".to_string());
         };
 
-        let device = match manager.device_by_index(index) {
-            Ok(d) => d,
-            Err(_) => return Vec::new(),
-        };
+        let device = manager
+            .device_by_index(index)
+            .map_err(|error| format!("Failed to open GPU {index}: {error}"))?;
 
-        let fan_count = device.fan_count().unwrap_or(0);
+        let fan_count = device
+            .fan_count()
+            .map_err(|error| format!("Failed to read GPU {index} fan count: {error}"))?;
         let mut targets = Vec::with_capacity(fan_count as usize);
 
         for i in 0..fan_count {
-            let target = device.cooler_target(i).unwrap_or(CoolerTarget::All);
-            targets.push(target);
+            targets.push(device.cooler_target(i).map_err(|error| {
+                format!("Failed to read GPU {index} Fan {i} cooler target: {error}")
+            })?);
         }
 
-        targets
+        Ok(targets)
     }
 
     // === GPU Control Operations ===
@@ -271,9 +389,29 @@ impl GpuMonitor {
             .map_err(|e| Self::format_nvml_error(e, "set fan policy"))
     }
 
+    /// Set fan policy using a stable GPU UUID.
+    pub fn set_fan_policy_by_uuid(
+        &self,
+        gpu_uuid: &str,
+        fan_index: u32,
+        policy: FanPolicy,
+    ) -> Result<(), String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let mut device = manager
+            .device_by_uuid(gpu_uuid)
+            .map_err(|error| format!("Failed to get GPU {gpu_uuid}: {error}"))?;
+
+        device
+            .set_fan_policy(fan_index, policy)
+            .map_err(|error| Self::format_nvml_error(error, "set fan policy"))
+    }
+
     /// Set fan speed for a specific fan on a GPU
     ///
-    /// Note: Fan must be in Manual mode for this to work.
+    /// Note: NVML implicitly switches the fan to Manual mode on success.
     ///
     /// # Arguments
     /// * `gpu_index` - GPU index
@@ -299,6 +437,26 @@ impl GpuMonitor {
             .map_err(|e| Self::format_nvml_error(e, "set fan speed"))
     }
 
+    /// Set fan speed using a stable GPU UUID.
+    pub fn set_fan_speed_by_uuid(
+        &self,
+        gpu_uuid: &str,
+        fan_index: u32,
+        speed: FanSpeed,
+    ) -> Result<(), String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let mut device = manager
+            .device_by_uuid(gpu_uuid)
+            .map_err(|error| format!("Failed to get GPU {gpu_uuid}: {error}"))?;
+
+        device
+            .set_fan_speed(fan_index, speed)
+            .map_err(|error| Self::format_nvml_error(error, "set fan speed"))
+    }
+
     /// Set power limit for a GPU
     ///
     /// # Arguments
@@ -319,12 +477,96 @@ impl GpuMonitor {
             .map_err(|e| Self::format_nvml_error(e, "set power limit"))
     }
 
+    /// Set a power limit using a stable GPU UUID.
+    pub fn set_power_limit_by_uuid(&self, gpu_uuid: &str, limit: PowerLimit) -> Result<(), String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let mut device = manager
+            .device_by_uuid(gpu_uuid)
+            .map_err(|error| format!("Failed to get GPU {gpu_uuid}: {error}"))?;
+
+        device
+            .set_power_limit(limit)
+            .map_err(|error| Self::format_nvml_error(error, "set power limit"))
+    }
+
+    /// Read the current acoustic target and its supported range.
+    pub fn acoustic_limits(&self, gpu_index: u32) -> Result<Option<AcousticLimits>, String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let device = manager
+            .device_by_index(gpu_index)
+            .map_err(|e| format!("Failed to get GPU {}: {}", gpu_index, e))?;
+
+        Self::optional_metric(device.acoustic_limits(), "acoustic limits", gpu_index)
+    }
+
+    /// Read acoustic limits using a stable GPU UUID.
+    pub fn acoustic_limits_by_uuid(
+        &self,
+        gpu_uuid: &str,
+    ) -> Result<Option<AcousticLimits>, String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let device = manager
+            .device_by_uuid(gpu_uuid)
+            .map_err(|error| format!("Failed to get GPU {gpu_uuid}: {error}"))?;
+
+        match device.acoustic_limits() {
+            Ok(limits) => Ok(Some(limits)),
+            Err(NvmlError::NotSupported(_)) => Ok(None),
+            Err(error) => Err(format!(
+                "Failed to read acoustic limits for GPU {gpu_uuid}: {error}"
+            )),
+        }
+    }
+
+    /// Set the acoustic temperature target for a GPU.
+    pub fn set_acoustic_limit(&self, gpu_index: u32, limit: Temperature) -> Result<(), String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let mut device = manager
+            .device_by_index(gpu_index)
+            .map_err(|e| format!("Failed to get GPU {}: {}", gpu_index, e))?;
+
+        device
+            .set_acoustic_limit(limit)
+            .map_err(|e| Self::format_nvml_error(e, "set acoustic temperature limit"))
+    }
+
+    /// Set the acoustic temperature target using a stable GPU UUID.
+    pub fn set_acoustic_limit_by_uuid(
+        &self,
+        gpu_uuid: &str,
+        limit: Temperature,
+    ) -> Result<(), String> {
+        let manager = self
+            .manager
+            .as_ref()
+            .ok_or_else(|| "NVML not available".to_string())?;
+        let mut device = manager
+            .device_by_uuid(gpu_uuid)
+            .map_err(|error| format!("Failed to get GPU {gpu_uuid}: {error}"))?;
+
+        device
+            .set_acoustic_limit(limit)
+            .map_err(|error| Self::format_nvml_error(error, "set acoustic temperature limit"))
+    }
+
     /// Format NVML error into user-friendly message
     fn format_nvml_error(error: NvmlError, operation: &str) -> String {
         match error {
             NvmlError::InsufficientPermissions(_) => {
                 format!(
-                    "Permission denied to {}. Try running with sudo or add your user to the 'video' group.",
+                    "Permission denied to {}. Retry with appropriate privileges or ask an administrator to configure a least-privilege policy.",
                     operation
                 )
             }

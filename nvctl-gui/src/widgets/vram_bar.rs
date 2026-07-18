@@ -42,9 +42,13 @@ impl canvas::Program<Message> for VramBar {
 
         let padding = 12.0;
         let bar_height = 20.0;
-        let bar_width = bounds.width - padding * 2.0;
+        let bar_width = (bounds.width - padding * 2.0).max(0.0);
         let bar_y = bounds.height / 2.0 + 4.0;
         let bar_radius = bar_height / 2.0;
+
+        if bar_width <= f32::EPSILON || bounds.height <= f32::EPSILON {
+            return vec![frame.into_geometry()];
+        }
 
         let ratio = self.ratio();
 
@@ -75,7 +79,7 @@ impl canvas::Program<Message> for VramBar {
         // FILLED PORTION - Glossy colorful fill
         // ═══════════════════════════════════════════════════════════════════════
         if ratio > 0.0 {
-            let fill_width = (bar_width * ratio).max(bar_height);
+            let fill_width = (bar_width * ratio).max(bar_height).min(bar_width);
 
             // Outer soft glow
             let glow_rect = rounded_rect(
@@ -188,7 +192,9 @@ fn vram_color(ratio: f32) -> iced::Color {
 /// Create a rounded rectangle path
 fn rounded_rect(x: f32, y: f32, width: f32, height: f32, radius: f32) -> Path {
     Path::new(|builder| {
-        let r = radius.min(width / 2.0).min(height / 2.0);
+        let width = width.max(0.0);
+        let height = height.max(0.0);
+        let r = radius.max(0.0).min(width / 2.0).min(height / 2.0);
 
         builder.move_to(Point::new(x + r, y));
         builder.line_to(Point::new(x + width - r, y));

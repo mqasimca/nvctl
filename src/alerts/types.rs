@@ -95,7 +95,7 @@ pub enum MetricType {
     EccCorrectableErrors,
     /// ECC uncorrectable errors
     EccUncorrectableErrors,
-    /// PCIe throughput
+    /// Total bidirectional PCIe throughput in MB/s
     PcieThroughput,
     /// PCIe replay counter
     PcieReplayCounter,
@@ -135,13 +135,13 @@ pub enum GpuFilter {
 }
 
 impl GpuFilter {
-    /// Check if this filter matches a GPU index
-    pub fn matches(&self, gpu_index: u32) -> bool {
+    /// Check if this filter matches a GPU index and UUID.
+    pub fn matches(&self, gpu_index: u32, gpu_uuid: Option<&str>) -> bool {
         match self {
             Self::All => true,
             Self::Index(idx) => *idx == gpu_index,
             Self::Indices(indices) => indices.contains(&gpu_index),
-            Self::Uuid(_) => false, // UUID matching requires GPU info
+            Self::Uuid(uuid) => gpu_uuid == Some(uuid.as_str()),
         }
     }
 }
@@ -251,6 +251,9 @@ pub struct Alert {
     pub rule_id: String,
     /// GPU index
     pub gpu_index: u32,
+    /// Stable GPU UUID, when known
+    #[serde(default)]
+    pub gpu_uuid: Option<String>,
     /// Timestamp when condition first met
     pub started_at: std::time::SystemTime,
     /// Timestamp when alert fired (if fired)
@@ -279,25 +282,26 @@ impl Alert {
         current_value: f64,
         threshold_value: f64,
     ) -> Self {
-        let id = format!(
-            "{}-{}-{}",
-            rule.id,
-            gpu_index,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-        );
+        Self::new_pending_for_gpu(rule, gpu_index, None, current_value, threshold_value)
+    }
 
-        let message = format!(
-            "{}: {} {} (current: {:.2})",
-            rule.name, rule.metric, rule.condition, current_value
-        );
+    /// Create a pending alert identified by a stable GPU UUID.
+    pub fn new_pending_for_gpu(
+        rule: &AlertRule,
+        gpu_index: u32,
+        gpu_uuid: Option<&str>,
+        current_value: f64,
+        threshold_value: f64,
+    ) -> Self {
+        let id = Self::stable_id(&rule.id, gpu_index, gpu_uuid);
+
+        let message = Self::format_message(rule, current_value);
 
         Self {
             id,
             rule_id: rule.id.clone(),
             gpu_index,
+            gpu_uuid: gpu_uuid.map(str::to_string),
             started_at: std::time::SystemTime::now(),
             fired_at: None,
             resolved_at: None,
@@ -308,6 +312,17 @@ impl Alert {
             message,
             state: AlertState::Pending,
         }
+    }
+
+    /// Build the deterministic active-alert ID for a physical GPU.
+    pub fn stable_id(rule_id: &str, gpu_index: u32, gpu_uuid: Option<&str>) -> String {
+        format!(
+            "{}-{}",
+            rule_id,
+            gpu_uuid
+                .map(str::to_string)
+                .unwrap_or_else(|| gpu_index.to_string())
+        )
     }
 
     /// Mark alert as firing
@@ -335,6 +350,22 @@ impl Alert {
     /// Update current value
     pub fn update_value(&mut self, value: f64) {
         self.current_value = value;
+    }
+
+    /// Refresh the mutable rule metadata and value for an existing alert.
+    pub fn update_from_rule(&mut self, rule: &AlertRule, value: f64, threshold_value: f64) {
+        self.severity = rule.severity;
+        self.metric = rule.metric;
+        self.current_value = value;
+        self.threshold_value = threshold_value;
+        self.message = Self::format_message(rule, value);
+    }
+
+    fn format_message(rule: &AlertRule, current_value: f64) -> String {
+        format!(
+            "{}: {} {} (current: {:.2})",
+            rule.name, rule.metric, rule.condition, current_value
+        )
     }
 
     /// Check if alert should fire based on duration
@@ -389,16 +420,24 @@ mod tests {
     #[test]
     fn test_gpu_filter_all() {
         let filter = GpuFilter::All;
-        assert!(filter.matches(0));
-        assert!(filter.matches(5));
+        assert!(filter.matches(0, None));
+        assert!(filter.matches(5, Some("GPU-test")));
     }
 
     #[test]
     fn test_gpu_filter_index() {
         let filter = GpuFilter::Index(2);
-        assert!(!filter.matches(0));
-        assert!(filter.matches(2));
-        assert!(!filter.matches(3));
+        assert!(!filter.matches(0, None));
+        assert!(filter.matches(2, None));
+        assert!(!filter.matches(3, None));
+    }
+
+    #[test]
+    fn test_gpu_filter_uuid() {
+        let filter = GpuFilter::Uuid("GPU-abc".to_string());
+        assert!(filter.matches(2, Some("GPU-abc")));
+        assert!(!filter.matches(2, Some("GPU-other")));
+        assert!(!filter.matches(2, None));
     }
 
     #[test]

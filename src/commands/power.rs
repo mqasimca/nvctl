@@ -3,7 +3,8 @@
 //! Handles power status and limit commands.
 
 use crate::cli::args::{OutputFormat, PowerArgs, PowerCommands};
-use crate::cli::output::{print_output, Message, PowerStatus};
+use crate::cli::output::{Message, OutputWriter, PowerStatus};
+use crate::commands::selection::{select_gpu_indices, GpuSelector};
 use crate::domain::PowerLimit;
 use crate::error::Result;
 use crate::nvml::{GpuDevice, GpuManager, NvmlManager};
@@ -12,15 +13,15 @@ use crate::nvml::{GpuDevice, GpuManager, NvmlManager};
 pub fn run_power(
     args: &PowerArgs,
     format: OutputFormat,
-    gpu_index: Option<u32>,
+    selector: &GpuSelector,
     dry_run: bool,
 ) -> Result<()> {
     let manager = NvmlManager::new()?;
 
     match &args.command {
-        PowerCommands::Status => run_power_status(&manager, format, gpu_index),
+        PowerCommands::Status => run_power_status(&manager, format, selector),
         PowerCommands::Limit { watts } => {
-            run_power_limit(&manager, *watts, format, gpu_index, dry_run)
+            run_power_limit(&manager, *watts, format, selector, dry_run)
         }
     }
 }
@@ -28,93 +29,182 @@ pub fn run_power(
 fn run_power_status(
     manager: &NvmlManager,
     format: OutputFormat,
-    gpu_index: Option<u32>,
+    selector: &GpuSelector,
 ) -> Result<()> {
-    let indices: Vec<u32> = if let Some(idx) = gpu_index {
-        vec![idx]
-    } else {
-        (0..manager.device_count()?).collect()
-    };
+    let indices = select_gpu_indices(manager, selector)?;
+    let mut output = OutputWriter::new(format);
 
     for idx in indices {
         let device = manager.device_by_index(idx)?;
         let info = device.info()?;
 
-        let usage = device.power_usage().map(|p| p.as_watts()).unwrap_or(0);
-        let limit = device.power_limit().map(|p| p.as_watts()).unwrap_or(0);
-        let constraints = device.power_constraints().ok();
+        let usage = device.power_usage()?.as_watts();
+        let limit = device.power_limit()?.as_watts();
+        let constraints = device.power_constraints()?;
 
         let status = PowerStatus {
             gpu_name: info.name,
             gpu_index: idx,
             current_usage_watts: usage,
             limit_watts: limit,
-            min_limit_watts: constraints.as_ref().map(|c| c.min.as_watts()).unwrap_or(0),
-            max_limit_watts: constraints.as_ref().map(|c| c.max.as_watts()).unwrap_or(0),
-            default_limit_watts: constraints.map(|c| c.default.as_watts()).unwrap_or(0),
+            min_limit_watts: constraints.min.as_watts(),
+            max_limit_watts: constraints.max.as_watts(),
+            default_limit_watts: constraints.default.as_watts(),
         };
 
-        print_output(&status, format)?;
+        output.write(&status)?;
     }
 
+    output.finish()?;
     Ok(())
 }
 
-fn run_power_limit(
-    manager: &NvmlManager,
+fn run_power_limit<M: GpuManager>(
+    manager: &M,
     watts: u32,
     format: OutputFormat,
-    gpu_index: Option<u32>,
+    selector: &GpuSelector,
     dry_run: bool,
 ) -> Result<()> {
-    let limit = PowerLimit::from_watts(watts);
+    let limit = PowerLimit::try_from_watts(watts)?;
 
-    let indices: Vec<u32> = if let Some(idx) = gpu_index {
-        vec![idx]
-    } else {
-        (0..manager.device_count()?).collect()
-    };
+    let indices = select_gpu_indices(manager, selector)?;
+    let mut output = OutputWriter::new(format);
+    let mut targets = Vec::with_capacity(indices.len());
 
-    for idx in indices {
-        let mut device = manager.device_by_index(idx)?;
+    // Validate every selected GPU before mutating any of them.
+    for &idx in &indices {
+        let device = manager.device_by_index(idx)?;
+        limit.validate(&device.power_constraints()?)?;
         let info = device.info()?;
+        targets.push((idx, info.uuid, info.name, device.power_limit()?));
+    }
 
-        // Validate against constraints
-        if let Ok(constraints) = device.power_constraints() {
-            if let Err(e) = limit.validate(&constraints) {
-                let message = Message {
-                    message: format!(
-                        "Cannot set power limit on GPU {}: {}. Valid range: {}-{}W",
-                        info.name,
-                        e,
-                        constraints.min.as_watts(),
-                        constraints.max.as_watts()
-                    ),
-                    success: false,
-                };
-                print_output(&message, format)?;
-                continue;
+    if !dry_run {
+        let mut applied: Vec<(String, PowerLimit)> = Vec::new();
+        for (_, uuid, _, old_limit) in &targets {
+            let result = manager
+                .device_by_uuid(uuid)
+                .and_then(|mut device| device.set_power_limit(limit));
+            if let Err(error) = result {
+                for (rollback_uuid, rollback_limit) in applied.into_iter().rev() {
+                    match manager.device_by_uuid(&rollback_uuid) {
+                        Ok(mut rollback_device) => {
+                            if let Err(rollback_error) =
+                                rollback_device.set_power_limit(rollback_limit)
+                            {
+                                log::error!(
+                                    "Failed to roll back GPU {} power limit: {}",
+                                    rollback_uuid,
+                                    rollback_error
+                                );
+                            }
+                        }
+                        Err(rollback_error) => log::error!(
+                            "Failed to open GPU {} for power rollback: {}",
+                            rollback_uuid,
+                            rollback_error
+                        ),
+                    }
+                }
+                return Err(error.into());
+            }
+            applied.push((uuid.clone(), *old_limit));
+        }
+    }
+
+    for (_, _, name, _) in targets {
+        let message = if dry_run {
+            format!("[DRY RUN] Would set power limit to {watts}W on GPU {name}")
+        } else {
+            format!("Set power limit to {watts}W on GPU {name}")
+        };
+
+        output.write(&Message {
+            message,
+            success: true,
+        })?;
+    }
+
+    output.finish()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::NvmlError;
+    use crate::mock::{MockDevice, MockManager};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FailingUuidLookupManager {
+        inner: MockManager,
+        uuid_lookups: AtomicUsize,
+        fail_on_lookup: usize,
+    }
+
+    impl GpuManager for FailingUuidLookupManager {
+        type Device<'manager>
+            = MockDevice
+        where
+            Self: 'manager;
+
+        fn device_count(&self) -> std::result::Result<u32, NvmlError> {
+            self.inner.device_count()
+        }
+
+        fn device_by_index(&self, index: u32) -> std::result::Result<Self::Device<'_>, NvmlError> {
+            self.inner.device_by_index(index)
+        }
+
+        fn device_by_uuid(&self, uuid: &str) -> std::result::Result<Self::Device<'_>, NvmlError> {
+            let lookup = self.uuid_lookups.fetch_add(1, Ordering::SeqCst);
+            if lookup == self.fail_on_lookup {
+                Err(NvmlError::GpuLost)
+            } else {
+                self.inner.device_by_uuid(uuid)
             }
         }
 
-        let message = if dry_run {
-            format!(
-                "[DRY RUN] Would set power limit to {}W on GPU {}",
-                watts, info.name
-            )
-        } else {
-            device.set_power_limit(limit)?;
-            format!("Set power limit to {}W on GPU {}", watts, info.name)
-        };
+        fn device_by_name(&self, name: &str) -> std::result::Result<Self::Device<'_>, NvmlError> {
+            self.inner.device_by_name(name)
+        }
 
-        print_output(
-            &Message {
-                message,
-                success: true,
-            },
-            format,
-        )?;
+        fn driver_version(&self) -> std::result::Result<String, NvmlError> {
+            self.inner.driver_version()
+        }
+
+        fn nvml_version(&self) -> std::result::Result<String, NvmlError> {
+            self.inner.nvml_version()
+        }
     }
 
-    Ok(())
+    #[test]
+    fn device_reopen_failure_rolls_back_earlier_power_writes() {
+        let manager = FailingUuidLookupManager {
+            inner: MockManager::new(2),
+            uuid_lookups: AtomicUsize::new(0),
+            fail_on_lookup: 1,
+        };
+
+        assert!(run_power_limit(
+            &manager,
+            250,
+            OutputFormat::Compact,
+            &GpuSelector::All,
+            false,
+        )
+        .is_err());
+
+        for index in 0..2 {
+            assert_eq!(
+                manager
+                    .device_by_index(index)
+                    .unwrap()
+                    .power_limit()
+                    .unwrap(),
+                PowerLimit::from_watts(300)
+            );
+        }
+    }
 }

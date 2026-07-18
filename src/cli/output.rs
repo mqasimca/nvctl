@@ -17,8 +17,8 @@ pub fn print_output<T: Serialize + TableDisplay>(data: &T, format: OutputFormat)
             writeln!(handle, "{}", data.to_table())?;
         }
         OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(data).unwrap_or_else(|_| "{}".to_string());
-            writeln!(handle, "{}", json)?;
+            serde_json::to_writer_pretty(&mut handle, data).map_err(json_io_error)?;
+            writeln!(handle)?;
         }
         OutputFormat::Compact => {
             writeln!(handle, "{}", data.to_compact())?;
@@ -28,6 +28,62 @@ pub fn print_output<T: Serialize + TableDisplay>(data: &T, format: OutputFormat)
     Ok(())
 }
 
+/// Collects heterogeneous command records so JSON mode emits one valid document.
+pub struct OutputWriter {
+    format: OutputFormat,
+    json_records: Vec<serde_json::Value>,
+}
+
+impl OutputWriter {
+    /// Create an output writer for a command invocation.
+    pub fn new(format: OutputFormat) -> Self {
+        Self {
+            format,
+            json_records: Vec::new(),
+        }
+    }
+
+    /// Write a record immediately for human formats or collect it for JSON.
+    pub fn write<T: Serialize + TableDisplay>(&mut self, data: &T) -> io::Result<()> {
+        match self.format {
+            OutputFormat::Json => {
+                self.json_records
+                    .push(serde_json::to_value(data).map_err(json_io_error)?);
+                Ok(())
+            }
+            format => print_output(data, format),
+        }
+    }
+
+    /// Finish output, emitting exactly one JSON value in JSON mode.
+    pub fn finish(self) -> io::Result<()> {
+        if !matches!(self.format, OutputFormat::Json) {
+            return Ok(());
+        }
+
+        let value = collected_json(self.json_records);
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        serde_json::to_writer_pretty(&mut handle, &value).map_err(json_io_error)?;
+        writeln!(handle)
+    }
+}
+
+fn collected_json(records: Vec<serde_json::Value>) -> serde_json::Value {
+    if records.len() == 1 {
+        records
+            .into_iter()
+            .next()
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::Array(records)
+    }
+}
+
+fn json_io_error(error: serde_json::Error) -> io::Error {
+    io::Error::other(error)
+}
+
 /// Trait for types that can be displayed as a table
 pub trait TableDisplay {
     /// Format as a table string
@@ -35,7 +91,7 @@ pub trait TableDisplay {
 
     /// Format as a compact single line
     fn to_compact(&self) -> String {
-        self.to_table().replace('\n', " | ")
+        self.to_table().trim_end_matches('\n').replace('\n', " | ")
     }
 }
 
@@ -276,23 +332,33 @@ impl TableDisplay for EccStatus {
 pub struct PcieStatus {
     pub gpu_name: String,
     pub gpu_index: u32,
-    pub current_gen: String,
-    pub max_gen: String,
-    pub current_width: String,
-    pub max_width: String,
+    pub current_gen: Option<String>,
+    pub max_gen: Option<String>,
+    pub current_width: Option<String>,
+    pub max_width: Option<String>,
     pub tx_throughput_mbs: Option<f64>,
     pub rx_throughput_mbs: Option<f64>,
-    pub replay_counter: u32,
+    pub replay_counter: Option<u64>,
     pub bandwidth_efficiency: Option<f64>,
 }
 
 impl TableDisplay for PcieStatus {
     fn to_table(&self) -> String {
         let mut output = format!("[{}] {}\n", self.gpu_index, self.gpu_name);
-        output.push_str(&format!(
-            "  PCIe Link: {} x{} (Max: {} x{})\n",
-            self.current_gen, self.current_width, self.max_gen, self.max_width
-        ));
+        if let (Some(current_gen), Some(current_width), Some(max_gen), Some(max_width)) = (
+            &self.current_gen,
+            &self.current_width,
+            &self.max_gen,
+            &self.max_width,
+        ) {
+            output.push_str(&format!(
+                "  PCIe Link: {} {} (Max: {} {})\n",
+                current_gen, current_width, max_gen, max_width
+            ));
+        } else {
+            output.push_str("  PCIe Metrics: Not Supported\n");
+            return output;
+        }
 
         if let (Some(tx), Some(rx)) = (self.tx_throughput_mbs, self.rx_throughput_mbs) {
             output.push_str(&format!(
@@ -305,7 +371,9 @@ impl TableDisplay for PcieStatus {
             output.push_str(&format!("  Bandwidth Efficiency: {:.1}%\n", eff));
         }
 
-        output.push_str(&format!("  Replay Counter: {}\n", self.replay_counter));
+        if let Some(replay_counter) = self.replay_counter {
+            output.push_str(&format!("  Replay Counter: {}\n", replay_counter));
+        }
 
         output
     }
@@ -427,8 +495,8 @@ pub struct ProcessListOutput {
     pub gpu_name: String,
     pub gpu_index: u32,
     pub process_count: usize,
-    pub total_memory_mb: f64,
-    pub total_memory_gb: f64,
+    pub total_memory_mb: Option<f64>,
+    pub total_memory_gb: Option<f64>,
     pub processes: Vec<ProcessEntry>,
 }
 
@@ -436,17 +504,21 @@ pub struct ProcessListOutput {
 pub struct ProcessEntry {
     pub pid: u32,
     pub name: String,
-    pub memory_mb: f64,
-    pub memory_gb: f64,
+    pub memory_mb: Option<f64>,
+    pub memory_gb: Option<f64>,
     pub process_type: String,
 }
 
 impl TableDisplay for ProcessListOutput {
     fn to_table(&self) -> String {
         let mut output = format!("[{}] {}\n", self.gpu_index, self.gpu_name);
+        let total_memory = self
+            .total_memory_gb
+            .map(|memory| format!("{memory:.2} GB"))
+            .unwrap_or_else(|| "Unavailable".to_string());
         output.push_str(&format!(
-            "  Processes: {} (Total Memory: {:.2} GB)\n\n",
-            self.process_count, self.total_memory_gb
+            "  Processes: {} (Total Memory: {})\n\n",
+            self.process_count, total_memory
         ));
 
         if self.processes.is_empty() {
@@ -463,7 +535,10 @@ impl TableDisplay for ProcessListOutput {
             output.push_str(&format!(
                 "  {:<8} {:<11} {:<14} {}\n",
                 process.pid,
-                format!("{:.1} MB", process.memory_mb),
+                process
+                    .memory_mb
+                    .map(|memory| format!("{memory:.1} MB"))
+                    .unwrap_or_else(|| "N/A".to_string()),
                 process.process_type,
                 process.name
             ));
@@ -476,9 +551,13 @@ impl TableDisplay for ProcessListOutput {
         if self.processes.is_empty() {
             format!("GPU {}: No processes", self.gpu_index)
         } else {
+            let total = self
+                .total_memory_gb
+                .map(|memory| format!("{memory:.2} GB"))
+                .unwrap_or_else(|| "unknown memory".to_string());
             format!(
-                "GPU {}: {} processes, {:.2} GB total",
-                self.gpu_index, self.process_count, self.total_memory_gb
+                "GPU {}: {} processes, {} total",
+                self.gpu_index, self.process_count, total
             )
         }
     }
@@ -527,5 +606,57 @@ mod tests {
         };
 
         assert!(msg.to_table().starts_with('✓'));
+    }
+
+    #[test]
+    fn collected_json_keeps_one_record_as_an_object() {
+        let value = collected_json(vec![serde_json::json!({"gpu": 0})]);
+        assert!(value.is_object());
+    }
+
+    #[test]
+    fn collected_json_wraps_multiple_records_in_an_array() {
+        let value = collected_json(vec![
+            serde_json::json!({"gpu": 0}),
+            serde_json::json!({"gpu": 1}),
+        ]);
+        assert_eq!(value.as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn pcie_width_is_not_prefixed_twice() {
+        let status = PcieStatus {
+            gpu_name: "Test GPU".to_string(),
+            gpu_index: 0,
+            current_gen: Some("Gen 4".to_string()),
+            max_gen: Some("Gen 5".to_string()),
+            current_width: Some("x16".to_string()),
+            max_width: Some("x16".to_string()),
+            tx_throughput_mbs: None,
+            rx_throughput_mbs: None,
+            replay_counter: None,
+            bandwidth_efficiency: None,
+        };
+
+        let table = status.to_table();
+        assert!(table.contains("Gen 4 x16"));
+        assert!(!table.contains("xx16"));
+    }
+
+    #[test]
+    fn default_compact_output_has_no_trailing_separator() {
+        let status = FanStatus {
+            gpu_name: "Test GPU".to_string(),
+            gpu_index: 0,
+            fans: vec![FanInfo {
+                index: 0,
+                speed: 50,
+                policy: "Auto".to_string(),
+            }],
+        };
+
+        let compact = status.to_compact();
+        assert!(!compact.ends_with(" | "));
+        assert!(!compact.contains('\n'));
     }
 }

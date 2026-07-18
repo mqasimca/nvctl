@@ -27,14 +27,14 @@ build: release
 ## Build optimized release binary
 release:
 	@mkdir -p $(BIN_DIR)
-	$(CARGO) build --release
+	$(CARGO) build --release --locked --bin $(BINARY)
 	@cp target/release/$(BINARY) $(BIN_DIR)/$(BINARY)
 	@echo "Built: $(BIN_DIR)/$(BINARY)"
 
 ## Build debug binary
 debug:
 	@mkdir -p $(BIN_DIR)
-	$(CARGO) build
+	$(CARGO) build --locked --bin $(BINARY)
 	@cp target/debug/$(BINARY) $(BIN_DIR)/$(BINARY)-debug
 	@echo "Built: $(BIN_DIR)/$(BINARY)-debug"
 
@@ -72,27 +72,27 @@ check: fmt-check lint test
 
 ## Run tests
 test:
-	$(CARGO) test
+	$(CARGO) test --workspace --all-features --locked
 
 ## Run clippy linter
 lint:
-	$(CARGO) clippy -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 ## Check code formatting
 fmt-check:
-	$(CARGO) fmt --check
+	$(CARGO) fmt --all -- --check
 
 ## Format code
 fmt:
-	$(CARGO) fmt
+	$(CARGO) fmt --all
 
 ## Generate documentation
 doc:
-	$(CARGO) doc --no-deps --open
+	$(CARGO) doc --workspace --all-features --no-deps --locked --open
 
 ## Check documentation builds
 doc-check:
-	$(CARGO) doc --no-deps
+	$(CARGO) doc --workspace --all-features --no-deps --locked
 
 # =============================================================================
 # CI Targets
@@ -128,15 +128,15 @@ gui-dev:
 ## Check GUI code (fmt + clippy)
 gui-check:
 	cargo fmt --package nvctl-gui -- --check
-	cargo clippy --package nvctl-gui -- -D warnings
+	cargo clippy --package nvctl-gui --all-targets --locked -- -D warnings
 
 ## Run GUI tests
 gui-test:
-	cargo test --package nvctl-gui
+	cargo test --package nvctl-gui --locked
 
 ## Build GUI release binary
 gui-build:
-	cargo build --release --package nvctl-gui
+	cargo build --release --package nvctl-gui --locked
 	@echo "Binary: target/release/nvctl-gui"
 
 ## Build GUI release binary using Docker
@@ -147,7 +147,7 @@ gui-build-docker:
 		-v $(shell pwd)/.cache/registry:/usr/local/cargo/registry \
 		-v $(shell pwd)/.cache/git:/usr/local/cargo/git \
 		-w /app $(DOCKER_IMAGE) \
-		cargo build --release --package nvctl-gui
+		cargo build --release --package nvctl-gui --locked
 	@echo "Binary: target/release/nvctl-gui"
 
 ## Clean GUI build artifacts

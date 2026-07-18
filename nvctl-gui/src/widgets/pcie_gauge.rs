@@ -23,24 +23,21 @@ impl PcieGauge {
 
     /// Get bandwidth utilization percentage (0-100)
     fn bandwidth_utilization(&self) -> f32 {
-        let max_bandwidth_gbps = self.metrics.link_status.max_bandwidth_gbps();
-        let current_gbps = (self.metrics.throughput.tx_bytes_per_sec()
-            + self.metrics.throughput.rx_bytes_per_sec()) as f64
-            / 1024.0
-            / 1024.0
-            / 1024.0;
-
-        if max_bandwidth_gbps > 0.0 {
-            ((current_gbps / max_bandwidth_gbps) * 100.0).min(100.0) as f32
-        } else {
-            0.0
-        }
+        self.metrics
+            .throughput
+            .utilization_percent(&self.metrics.link_status)
+            .clamp(0.0, 100.0) as f32
     }
 
     /// Get bandwidth efficiency color
     fn efficiency_color(&self) -> Color {
         let efficiency = self.metrics.link_status.bandwidth_efficiency_percent();
-        if efficiency < 50.0 {
+        // NVIDIA GPUs normally downshift the PCIe link while idle. Treat a
+        // reduced generation/width as a warning only while the current link
+        // is carrying enough traffic for that reduction to matter.
+        if self.bandwidth_utilization() < 10.0 {
+            colors::ACCENT_CYAN
+        } else if efficiency < 50.0 {
             colors::ACCENT_ORANGE // Warning: not using full link capability
         } else if efficiency < 80.0 {
             colors::ACCENT_CYAN
@@ -207,4 +204,31 @@ fn draw_arc(
             ..Default::default()
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nvctl::domain::{
+        PcieGeneration, PcieLinkStatus, PcieLinkWidth, PcieReplayCounter, PcieThroughput,
+    };
+
+    #[test]
+    fn idle_link_downshift_is_not_colored_as_a_warning() {
+        let metrics = PcieMetrics::new(
+            PcieLinkStatus::new(
+                PcieGeneration::Gen1,
+                PcieGeneration::Gen4,
+                PcieLinkWidth::X16,
+                PcieLinkWidth::X16,
+            ),
+            PcieThroughput::zero(),
+            PcieReplayCounter::new(0),
+        );
+
+        assert_eq!(
+            PcieGauge::new(metrics).efficiency_color(),
+            colors::ACCENT_CYAN
+        );
+    }
 }

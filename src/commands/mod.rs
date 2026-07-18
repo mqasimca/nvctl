@@ -10,6 +10,7 @@ pub mod info;
 pub mod list;
 pub mod power;
 pub mod processes;
+pub mod selection;
 pub mod thermal;
 
 pub use alerts::run_alerts;
@@ -20,4 +21,5 @@ pub use info::run_info;
 pub use list::run_list;
 pub use power::run_power;
 pub use processes::run_processes;
+pub use selection::GpuSelector;
 pub use thermal::run_thermal;

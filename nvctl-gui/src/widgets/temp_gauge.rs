@@ -30,6 +30,7 @@ impl TempGauge {
         self.thresholds
             .shutdown
             .map(|t| t.as_celsius())
+            .filter(|temperature| *temperature > 0)
             .unwrap_or(100)
     }
 }
@@ -317,5 +318,12 @@ mod tests {
         let thresholds = ThermalThresholds::new(Some(Temperature::new(95)), None, None);
         let gauge = TempGauge::new(Temperature::new(50), thresholds);
         assert_eq!(gauge.max_temp(), 95);
+    }
+
+    #[test]
+    fn invalid_non_positive_shutdown_threshold_uses_safe_default() {
+        let thresholds = ThermalThresholds::new(Some(Temperature::new(0)), None, None);
+        let gauge = TempGauge::new(Temperature::new(0), thresholds);
+        assert_eq!(gauge.max_temp(), 100);
     }
 }

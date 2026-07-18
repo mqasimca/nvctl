@@ -13,8 +13,27 @@ use crate::domain::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Return system uptime when the platform exposes it.
+pub fn system_uptime_seconds() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let contents = std::fs::read_to_string("/proc/uptime").ok()?;
+        let seconds = contents.split_whitespace().next()?.parse::<f64>().ok()?;
+        if seconds.is_finite() && seconds >= 0.0 {
+            return Some(seconds.floor() as u64);
+        }
+        None
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// GPU health score (0-100)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(from = "u8", into = "u8")]
 pub struct HealthScore(u8);
 
 impl HealthScore {
@@ -48,6 +67,18 @@ impl HealthScore {
             HealthStatus::Poor => "orange",
             HealthStatus::Critical => "red",
         }
+    }
+}
+
+impl From<u8> for HealthScore {
+    fn from(score: u8) -> Self {
+        Self::new(score)
+    }
+}
+
+impl From<HealthScore> for u8 {
+    fn from(score: HealthScore) -> Self {
+        score.0
     }
 }
 
@@ -157,6 +188,19 @@ impl HealthCalculator {
         performance_weight: f64,
         pcie_weight: f64,
     ) -> Self {
+        let weights = [
+            thermal_weight,
+            power_weight,
+            memory_weight,
+            performance_weight,
+            pcie_weight,
+        ];
+        assert!(
+            weights
+                .iter()
+                .all(|weight| weight.is_finite() && *weight >= 0.0),
+            "Weights must be finite and non-negative"
+        );
         let total =
             thermal_weight + power_weight + memory_weight + performance_weight + pcie_weight;
         assert!(
@@ -260,8 +304,8 @@ impl HealthCalculator {
 
     /// Calculate power health score (0-100)
     fn calculate_power_health(&self, params: &HealthParams) -> HealthScore {
-        let power_ratio =
-            params.power_usage.as_watts() as f64 / params.power_limit.as_watts().max(1) as f64;
+        let power_ratio = params.power_usage.as_milliwatts() as f64
+            / params.power_limit.as_milliwatts().max(1) as f64;
         let mut score: u8 = 100;
 
         // Power usage penalty
@@ -320,14 +364,6 @@ impl HealthCalculator {
             score = 70; // Performance degraded due to throttling
         }
 
-        // Clock throttling (if clocks are unusually low while under load)
-        if let Some(util) = &params.utilization {
-            if util.gpu_percent() > 80 {
-                // Under heavy load - this is fine
-                score = 100;
-            }
-        }
-
         HealthScore::new(score)
     }
 
@@ -338,9 +374,13 @@ impl HealthCalculator {
         if let Some(pcie) = &params.pcie_metrics {
             // Link efficiency penalty
             let efficiency = pcie.link_status.bandwidth_efficiency_percent();
-            if efficiency < 50.0 {
+            let link_is_loaded = params
+                .utilization
+                .is_some_and(|utilization| utilization.gpu_percent() >= 50)
+                || pcie.throughput.total_gbps() >= 1.0;
+            if link_is_loaded && efficiency < 50.0 {
                 score = 60; // Link not using full capability
-            } else if efficiency < 75.0 {
+            } else if link_is_loaded && efficiency < 75.0 {
                 score = 85;
             }
 
@@ -393,8 +433,8 @@ impl HealthCalculator {
         issues: &mut Vec<HealthIssue>,
         recommendations: &mut Vec<String>,
     ) {
-        let power_ratio =
-            params.power_usage.as_watts() as f64 / params.power_limit.as_watts().max(1) as f64;
+        let power_ratio = params.power_usage.as_milliwatts() as f64
+            / params.power_limit.as_milliwatts().max(1) as f64;
 
         if params.is_power_throttling {
             issues.push(HealthIssue {
@@ -426,8 +466,8 @@ impl HealthCalculator {
                     severity: IssueSeverity::Critical,
                     category: "Memory".to_string(),
                     description: format!(
-                        "Uncorrectable ECC errors detected: {}",
-                        ecc.uncorrectable_current
+                        "Uncorrectable ECC errors detected: {} this boot, {} lifetime",
+                        ecc.uncorrectable_current, ecc.uncorrectable_lifetime
                     ),
                 });
                 recommendations.push("CRITICAL: Uncorrectable memory errors indicate hardware failure. Consider RMA or replacement".to_string());
@@ -481,8 +521,12 @@ impl HealthCalculator {
     ) {
         if let Some(pcie) = &params.pcie_metrics {
             let efficiency = pcie.link_status.bandwidth_efficiency_percent();
+            let link_is_loaded = params
+                .utilization
+                .is_some_and(|utilization| utilization.gpu_percent() >= 50)
+                || pcie.throughput.total_gbps() >= 1.0;
 
-            if efficiency < 50.0 {
+            if link_is_loaded && efficiency < 50.0 {
                 issues.push(HealthIssue {
                     severity: IssueSeverity::Warning,
                     category: "PCIe".to_string(),
@@ -533,7 +577,10 @@ pub struct HealthParams<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{memory::EccErrors, PowerLimit, Temperature, ThermalThresholds};
+    use crate::domain::{
+        memory::EccErrors, PcieGeneration, PcieLinkStatus, PcieLinkWidth, PcieMetrics,
+        PcieReplayCounter, PcieThroughput, PowerLimit, Temperature, ThermalThresholds, Utilization,
+    };
 
     #[test]
     fn test_health_score_status() {
@@ -542,6 +589,14 @@ mod tests {
         assert_eq!(HealthScore::new(60).status(), HealthStatus::Fair);
         assert_eq!(HealthScore::new(30).status(), HealthStatus::Poor);
         assert_eq!(HealthScore::new(10).status(), HealthStatus::Critical);
+        let deserialized: HealthScore = serde_json::from_str("255").unwrap();
+        assert_eq!(deserialized.score(), 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "Weights must be finite and non-negative")]
+    fn health_calculator_rejects_negative_weights() {
+        let _ = HealthCalculator::new(-0.1, 0.3, 0.3, 0.3, 0.2);
     }
 
     #[test]
@@ -593,6 +648,28 @@ mod tests {
     }
 
     #[test]
+    fn high_utilization_does_not_erase_throttling_penalty() {
+        let calculator = HealthCalculator::default();
+        let thresholds = ThermalThresholds::default();
+        let utilization = Utilization::new(95, 50);
+        let params = HealthParams {
+            temperature: Temperature::new(70),
+            thresholds: &thresholds,
+            power_usage: PowerLimit::from_watts(200),
+            power_limit: PowerLimit::from_watts(250),
+            is_thermal_throttling: true,
+            is_power_throttling: false,
+            ecc_errors: None,
+            vram_usage_ratio: None,
+            utilization: Some(&utilization),
+            pcie_metrics: None,
+            uptime_seconds: 3600,
+        };
+
+        assert_eq!(calculator.calculate(&params).performance.score(), 70);
+    }
+
+    #[test]
     fn test_ecc_errors_critical() {
         let calculator = HealthCalculator::default();
         let thresholds = ThermalThresholds::default();
@@ -618,5 +695,50 @@ mod tests {
             .issues
             .iter()
             .any(|i| matches!(i.severity, IssueSeverity::Critical)));
+    }
+
+    #[test]
+    fn idle_pcie_downshift_is_not_reported_as_unhealthy() {
+        let calculator = HealthCalculator::default();
+        let thresholds = ThermalThresholds::default();
+        let pcie = PcieMetrics::new(
+            PcieLinkStatus::new(
+                PcieGeneration::Gen1,
+                PcieGeneration::Gen4,
+                PcieLinkWidth::X16,
+                PcieLinkWidth::X16,
+            ),
+            PcieThroughput::zero(),
+            PcieReplayCounter::new(0),
+        );
+        let idle = Utilization::new(5, 2);
+        let loaded = Utilization::new(90, 20);
+        let make_params = |utilization| HealthParams {
+            temperature: Temperature::new(50),
+            thresholds: &thresholds,
+            power_usage: PowerLimit::from_watts(50),
+            power_limit: PowerLimit::from_watts(250),
+            is_thermal_throttling: false,
+            is_power_throttling: false,
+            ecc_errors: None,
+            vram_usage_ratio: None,
+            utilization: Some(utilization),
+            pcie_metrics: Some(&pcie),
+            uptime_seconds: 3600,
+        };
+
+        let idle_health = calculator.calculate(&make_params(&idle));
+        assert_eq!(idle_health.pcie.score(), 100);
+        assert!(!idle_health
+            .issues
+            .iter()
+            .any(|issue| issue.category == "PCIe"));
+
+        let loaded_health = calculator.calculate(&make_params(&loaded));
+        assert_eq!(loaded_health.pcie.score(), 60);
+        assert!(loaded_health
+            .issues
+            .iter()
+            .any(|issue| issue.category == "PCIe"));
     }
 }

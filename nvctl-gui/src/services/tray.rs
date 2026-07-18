@@ -10,6 +10,7 @@ use std::sync::{
     Arc,
 };
 use std::thread;
+use std::time::Duration;
 
 /// System tray state shared between tray and main app
 #[derive(Debug, Clone)]
@@ -176,6 +177,7 @@ impl Tray for NvctlTray {
 /// Handle to a running tray service
 pub struct TrayHandle {
     state: TrayState,
+    running: Arc<AtomicBool>,
 }
 
 impl TrayHandle {
@@ -198,6 +200,19 @@ impl TrayHandle {
     pub fn quit_requested(&self) -> bool {
         self.state.quit_requested()
     }
+
+    /// Whether the tray service thread is still alive.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
+    }
+}
+
+struct TrayRunningGuard(Arc<AtomicBool>);
+
+impl Drop for TrayRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Start the system tray service
@@ -206,20 +221,35 @@ impl TrayHandle {
 pub fn start_tray() -> Option<TrayHandle> {
     let state = TrayState::new();
     let tray_state = state.clone();
+    let running = Arc::new(AtomicBool::new(true));
+    let service_running = Arc::clone(&running);
 
-    // Spawn tray in a separate thread
+    // Start the D-Bus service in a separate thread. Give immediate setup
+    // failures a chance to surface so start-minimized never hides the only
+    // window when no session bus is available.
     let result = thread::Builder::new()
         .name("nvctl-tray".into())
         .spawn(move || {
+            let _running_guard = TrayRunningGuard(service_running);
             let tray = NvctlTray { state: tray_state };
-            // This call blocks, running the tray event loop
-            TrayService::new(tray).spawn();
+            TrayService::new(tray).run()
         });
 
     match result {
-        Ok(_) => {
+        Ok(handle) => {
+            thread::sleep(Duration::from_millis(100));
+            if handle.is_finished() {
+                match handle.join() {
+                    Ok(Err(error)) => log::warn!("Failed to start system tray: {}", error),
+                    Ok(Ok(())) => log::warn!("System tray service stopped during startup"),
+                    Err(_) => log::warn!("System tray service panicked during startup"),
+                }
+                return None;
+            }
+            // Dropping a JoinHandle detaches the still-running service thread.
+            drop(handle);
             log::info!("System tray started");
-            Some(TrayHandle { state })
+            Some(TrayHandle { state, running })
         }
         Err(e) => {
             log::warn!("Failed to start system tray: {}", e);
@@ -268,5 +298,17 @@ mod tests {
 
         state.request_quit();
         assert!(state.quit_requested());
+    }
+
+    #[test]
+    fn tray_handle_reports_service_liveness() {
+        let running = Arc::new(AtomicBool::new(true));
+        let handle = TrayHandle {
+            state: TrayState::new(),
+            running: Arc::clone(&running),
+        };
+        assert!(handle.is_running());
+        running.store(false, Ordering::Release);
+        assert!(!handle.is_running());
     }
 }

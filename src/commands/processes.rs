@@ -3,8 +3,9 @@
 //! Lists processes running on GPU with memory usage.
 
 use crate::cli::args::{OutputFormat, ProcessTypeFilter, ProcessesArgs};
-use crate::cli::output::{print_output, ProcessEntry, ProcessListOutput};
-use crate::domain::{GpuProcess, ProcessType};
+use crate::cli::output::{OutputWriter, ProcessEntry, ProcessListOutput};
+use crate::commands::selection::{select_gpu_indices, GpuSelector};
+use crate::domain::{GpuProcess, ProcessList, ProcessType};
 use crate::error::Result;
 use crate::nvml::{GpuDevice, GpuManager, NvmlManager};
 
@@ -12,16 +13,13 @@ use crate::nvml::{GpuDevice, GpuManager, NvmlManager};
 pub fn run_processes(
     args: &ProcessesArgs,
     format: OutputFormat,
-    gpu_index: Option<u32>,
+    selector: &GpuSelector,
 ) -> Result<()> {
     let manager = NvmlManager::new()?;
 
     // Determine which GPUs to check
-    let indices: Vec<u32> = if let Some(idx) = gpu_index {
-        vec![idx]
-    } else {
-        (0..manager.device_count()?).collect()
-    };
+    let indices = select_gpu_indices(&manager, selector)?;
+    let mut writer = OutputWriter::new(format);
 
     for &idx in &indices {
         let device = manager.device_by_index(idx)?;
@@ -48,13 +46,18 @@ pub fn run_processes(
             processes.sort_by_key(|p| p.pid);
         } else {
             // Default: sort by memory (descending)
-            processes.sort_by(|a, b| b.used_memory.cmp(&a.used_memory));
+            processes.sort_by_key(|process| std::cmp::Reverse(process.used_memory));
         }
 
         // Limit to top N if specified
         if let Some(n) = args.top {
             processes.truncate(n);
         }
+
+        // Summary totals must describe the rows that survive filtering and
+        // --top, not every process in the original NVML response.
+        let displayed_processes =
+            ProcessList::new(processes.iter().map(|process| (*process).clone()).collect());
 
         // Convert to output format
         let process_entries: Vec<ProcessEntry> = processes
@@ -72,17 +75,14 @@ pub fn run_processes(
             gpu_name: info.name.clone(),
             gpu_index: idx,
             process_count: process_entries.len(),
-            total_memory_mb: process_list.total_memory_mb(),
-            total_memory_gb: process_list.total_memory_gb(),
+            total_memory_mb: displayed_processes.total_memory_mb(),
+            total_memory_gb: displayed_processes.total_memory_gb(),
             processes: process_entries,
         };
 
-        print_output(&output, format)?;
-
-        if indices.len() > 1 {
-            println!(); // Separator between GPUs
-        }
+        writer.write(&output)?;
     }
 
+    writer.finish()?;
     Ok(())
 }

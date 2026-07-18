@@ -53,6 +53,7 @@ impl AlertService {
         for alert in &new_alerts {
             if let Err(e) = self.notifier.notify_all(alert) {
                 log::warn!("Failed to send notification for alert {}: {}", alert.id, e);
+                self.manager.retry_notification(&alert.id);
             }
         }
 

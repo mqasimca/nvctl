@@ -3,6 +3,7 @@
 //! Application settings and configuration.
 
 use crate::message::Message;
+use crate::services::GuiConfig;
 use crate::state::AppState;
 use crate::theme::{colors, font_size, spacing};
 
@@ -10,12 +11,12 @@ use iced::widget::{column, container, horizontal_space, row, scrollable, text};
 use iced::{Alignment, Element, Length};
 
 /// Render the settings view
-pub fn view_settings(state: &AppState) -> Element<'_, Message> {
+pub fn view_settings<'a>(state: &'a AppState, config: &'a GuiConfig) -> Element<'a, Message> {
     let header = view_header();
     let about = view_about();
     let keyboard_shortcuts = view_keyboard_shortcuts();
     let gpu_list = view_gpu_list(state);
-    let app_info = view_app_info();
+    let app_info = view_app_info(config.preferences.poll_interval_ms);
 
     let content = column![header, about, keyboard_shortcuts, gpu_list, app_info]
         .spacing(spacing::LG)
@@ -188,7 +189,7 @@ fn view_gpu_list(state: &AppState) -> Element<'_, Message> {
 }
 
 /// Application info
-fn view_app_info() -> Element<'static, Message> {
+fn view_app_info(poll_interval_ms: u64) -> Element<'static, Message> {
     let title = text("System Information")
         .size(font_size::LG)
         .color(colors::TEXT_PRIMARY);
@@ -197,7 +198,10 @@ fn view_app_info() -> Element<'static, Message> {
         view_info_row("Fan Control", "Manual speed and curve-based control"),
         view_info_row("Power Control", "Adjustable power limits"),
         view_info_row("Thermal Monitoring", "Real-time temperature tracking"),
-        view_info_row("Update Rate", "1 second polling interval"),
+        view_info_row(
+            "Update Rate",
+            format!("{} ms polling interval", poll_interval_ms)
+        ),
     ]
     .spacing(spacing::SM);
 
@@ -216,13 +220,15 @@ fn view_app_info() -> Element<'static, Message> {
         .into()
 }
 
-fn view_info_row<'a>(label: &'a str, value: &'a str) -> Element<'a, Message> {
+fn view_info_row(label: &'static str, value: impl Into<String>) -> Element<'static, Message> {
     row![
         text(label)
             .size(font_size::BASE)
             .color(colors::TEXT_SECONDARY),
         horizontal_space(),
-        text(value).size(font_size::SM).color(colors::TEXT_PRIMARY),
+        text(value.into())
+            .size(font_size::SM)
+            .color(colors::TEXT_PRIMARY),
     ]
     .align_y(Alignment::Center)
     .into()

@@ -4,18 +4,26 @@
 //! according to configured fan curves.
 
 use crate::services::GpuMonitor;
-use nvctl::domain::{FanCurve, FanPolicy, FanSpeed};
-use std::collections::HashMap;
+use nvctl::domain::{FanCurve, FanPolicy};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
+struct RunningReset(Arc<AtomicBool>);
+
+impl Drop for RunningReset {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Configuration for a single fan's curve control
 #[derive(Debug, Clone)]
 pub struct FanCurveConfig {
-    /// GPU index
-    pub gpu_index: u32,
+    /// Stable GPU UUID
+    pub gpu_uuid: String,
     /// Fan index
     pub fan_index: u32,
     /// The fan curve to apply
@@ -25,38 +33,41 @@ pub struct FanCurveConfig {
 }
 
 /// Shared state for the curve daemon
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CurveDaemonState {
-    /// Fan curve configurations keyed by (gpu_index, fan_index)
-    curves: HashMap<(u32, u32), FanCurveConfig>,
+    /// Fan curve configurations keyed by (GPU UUID, fan index)
+    curves: HashMap<(String, u32), FanCurveConfig>,
     /// Last applied speed per fan (to avoid unnecessary writes)
-    last_speeds: HashMap<(u32, u32), u8>,
+    last_speeds: HashMap<(String, u32), u8>,
+    /// Fans whose policy is owned by this daemon and must be restored on release
+    controlled_fans: HashSet<(String, u32)>,
 }
 
 impl CurveDaemonState {
     /// Set or update a fan curve configuration
-    pub fn set_curve(&mut self, gpu_index: u32, fan_index: u32, curve: FanCurve, enabled: bool) {
+    pub fn set_curve(
+        &mut self,
+        gpu_uuid: impl Into<String>,
+        fan_index: u32,
+        curve: FanCurve,
+        enabled: bool,
+    ) {
+        let gpu_uuid = gpu_uuid.into();
         let config = FanCurveConfig {
-            gpu_index,
+            gpu_uuid: gpu_uuid.clone(),
             fan_index,
             curve,
             enabled,
         };
-        self.curves.insert((gpu_index, fan_index), config);
+        self.curves.insert((gpu_uuid, fan_index), config);
     }
 
     /// Enable or disable curve control for a fan
     #[allow(dead_code)]
-    pub fn set_enabled(&mut self, gpu_index: u32, fan_index: u32, enabled: bool) {
-        if let Some(config) = self.curves.get_mut(&(gpu_index, fan_index)) {
+    pub fn set_enabled(&mut self, gpu_uuid: &str, fan_index: u32, enabled: bool) {
+        if let Some(config) = self.curves.get_mut(&(gpu_uuid.to_string(), fan_index)) {
             config.enabled = enabled;
         }
-    }
-
-    /// Remove a fan curve configuration
-    pub fn remove_curve(&mut self, gpu_index: u32, fan_index: u32) {
-        self.curves.remove(&(gpu_index, fan_index));
-        self.last_speeds.remove(&(gpu_index, fan_index));
     }
 
     /// Get all enabled curve configurations
@@ -70,14 +81,51 @@ impl CurveDaemonState {
     }
 
     /// Record last applied speed
-    pub fn set_last_speed(&mut self, gpu_index: u32, fan_index: u32, speed: u8) {
-        self.last_speeds.insert((gpu_index, fan_index), speed);
+    pub fn set_last_speed(&mut self, gpu_uuid: &str, fan_index: u32, speed: u8) {
+        self.last_speeds
+            .insert((gpu_uuid.to_string(), fan_index), speed);
     }
 
     /// Get last applied speed
-    pub fn last_speed(&self, gpu_index: u32, fan_index: u32) -> Option<u8> {
-        self.last_speeds.get(&(gpu_index, fan_index)).copied()
+    pub fn last_speed(&self, gpu_uuid: &str, fan_index: u32) -> Option<u8> {
+        self.last_speeds
+            .get(&(gpu_uuid.to_string(), fan_index))
+            .copied()
     }
+
+    fn mark_controlled(&mut self, gpu_uuid: &str, fan_index: u32) {
+        self.controlled_fans
+            .insert((gpu_uuid.to_string(), fan_index));
+    }
+
+    fn release_controlled(&mut self, gpu_uuid: &str, fan_index: u32) {
+        self.controlled_fans
+            .remove(&(gpu_uuid.to_string(), fan_index));
+        self.last_speeds.remove(&(gpu_uuid.to_string(), fan_index));
+    }
+
+    fn is_controlled(&self, gpu_uuid: &str, fan_index: u32) -> bool {
+        self.controlled_fans
+            .contains(&(gpu_uuid.to_string(), fan_index))
+    }
+
+    fn controlled_fans(&self) -> Vec<(String, u32)> {
+        self.controlled_fans.iter().cloned().collect()
+    }
+}
+
+fn restore_auto_after_failure<F>(
+    state: &mut CurveDaemonState,
+    gpu_uuid: &str,
+    fan_index: u32,
+    restore: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    restore()?;
+    state.release_controlled(gpu_uuid, fan_index);
+    Ok(())
 }
 
 /// Fan curve daemon that runs in the background
@@ -116,83 +164,190 @@ impl CurveDaemon {
             return;
         }
 
+        // Reap an unexpectedly exited worker before replacing its handle.
+        if let Some(handle) = self.handle.take() {
+            if handle.join().is_err() {
+                log::error!("Previous fan curve daemon thread terminated unexpectedly");
+            }
+        }
+
         self.running.store(true, Ordering::SeqCst);
 
         let state = Arc::clone(&self.state);
         let running = Arc::clone(&self.running);
 
         let handle = thread::spawn(move || {
+            let _running_reset = RunningReset(Arc::clone(&running));
             log::info!("Fan curve daemon started");
             let monitor = GpuMonitor::new();
 
             while running.load(Ordering::SeqCst) {
                 // Process curves
-                if let Ok(mut state_guard) = state.write() {
+                {
+                    let mut state_guard = match state.write() {
+                        Ok(state) => state,
+                        Err(poisoned) => {
+                            log::error!("Fan curve state lock was poisoned; recovering it");
+                            poisoned.into_inner()
+                        }
+                    };
                     let configs: Vec<FanCurveConfig> = state_guard
                         .enabled_curves()
                         .iter()
                         .map(|c| (*c).clone())
                         .collect();
+                    let enabled_keys: HashSet<(String, u32)> = configs
+                        .iter()
+                        .map(|config| (config.gpu_uuid.clone(), config.fan_index))
+                        .collect();
+
+                    // A disabled or removed curve immediately gives policy back to NVML.
+                    for (gpu_uuid, fan_index) in state_guard.controlled_fans() {
+                        if !enabled_keys.contains(&(gpu_uuid.clone(), fan_index)) {
+                            match restore_auto_after_failure(
+                                &mut state_guard,
+                                &gpu_uuid,
+                                fan_index,
+                                || {
+                                    monitor.set_fan_policy_by_uuid(
+                                        &gpu_uuid,
+                                        fan_index,
+                                        FanPolicy::Auto,
+                                    )
+                                },
+                            ) {
+                                Ok(()) => {}
+                                Err(error) => log::warn!(
+                                    "Failed to restore GPU {} Fan {} to auto: {}",
+                                    gpu_uuid,
+                                    fan_index,
+                                    error
+                                ),
+                            }
+                        }
+                    }
 
                     for config in configs {
-                        // Get current temperature
-                        if let Some(snapshot) = monitor.poll_gpu(config.gpu_index) {
-                            let temp = snapshot.temperature.as_celsius();
-                            let target_speed = config.curve.speed_for_temperature(temp);
-                            let target_pct = target_speed.as_percentage();
+                        // Read actual hardware state every cycle so external policy/speed changes
+                        // are corrected even when the curve target itself did not change.
+                        match monitor.poll_fan_control_by_uuid(&config.gpu_uuid, config.fan_index) {
+                            Ok((temperature, current_speed, policy)) => {
+                                let temp = temperature.as_celsius();
+                                let target_speed = config.curve.speed_for_temperature(temp);
+                                let target_pct = target_speed.as_percentage();
+                                let last =
+                                    state_guard.last_speed(&config.gpu_uuid, config.fan_index);
 
-                            // Check if speed changed
-                            let last = state_guard.last_speed(config.gpu_index, config.fan_index);
-                            if last != Some(target_pct) {
-                                // Ensure fan is in manual mode first
-                                if let Some(policy) =
-                                    snapshot.fan_policies.get(config.fan_index as usize)
-                                {
-                                    if *policy != FanPolicy::Manual {
-                                        if let Err(e) = monitor.set_fan_policy(
-                                            config.gpu_index,
+                                let policy_changed = policy != FanPolicy::Manual;
+                                if policy_changed {
+                                    if let Err(error) = monitor.set_fan_policy_by_uuid(
+                                        &config.gpu_uuid,
+                                        config.fan_index,
+                                        FanPolicy::Manual,
+                                    ) {
+                                        log::warn!(
+                                            "Failed to set GPU {} Fan {} to manual mode: {}",
+                                            config.gpu_uuid,
                                             config.fan_index,
-                                            FanPolicy::Manual,
-                                        ) {
-                                            log::warn!(
-                                                "Failed to set fan {} to manual mode: {}",
-                                                config.fan_index,
-                                                e
-                                            );
-                                            continue;
-                                        }
+                                            error
+                                        );
+                                        continue;
                                     }
                                 }
 
-                                // Set fan speed
-                                if let Ok(speed) = FanSpeed::new(target_pct) {
-                                    match monitor.set_fan_speed(
-                                        config.gpu_index,
+                                state_guard.mark_controlled(&config.gpu_uuid, config.fan_index);
+                                if policy_changed
+                                    || current_speed.as_percentage() != target_pct
+                                    || last != Some(target_pct)
+                                {
+                                    let write_failed = match monitor.set_fan_speed_by_uuid(
+                                        &config.gpu_uuid,
                                         config.fan_index,
-                                        speed,
+                                        target_speed,
                                     ) {
                                         Ok(()) => {
                                             log::debug!(
                                                 "GPU {} Fan {}: {}°C -> {}%",
-                                                config.gpu_index,
+                                                config.gpu_uuid,
                                                 config.fan_index,
                                                 temp,
                                                 target_pct
                                             );
                                             state_guard.set_last_speed(
-                                                config.gpu_index,
+                                                &config.gpu_uuid,
                                                 config.fan_index,
                                                 target_pct,
                                             );
+                                            false
                                         }
-                                        Err(e) => {
+                                        Err(error) => {
                                             log::warn!(
                                                 "Failed to set fan speed for GPU {} Fan {}: {}",
-                                                config.gpu_index,
+                                                config.gpu_uuid,
                                                 config.fan_index,
-                                                e
+                                                error
                                             );
+                                            true
                                         }
+                                    };
+                                    if write_failed {
+                                        // A fixed manual speed without reliable updates is
+                                        // unsafe. Give control back to the driver immediately.
+                                        match restore_auto_after_failure(
+                                            &mut state_guard,
+                                            &config.gpu_uuid,
+                                            config.fan_index,
+                                            || {
+                                                monitor.set_fan_policy_by_uuid(
+                                                    &config.gpu_uuid,
+                                                    config.fan_index,
+                                                    FanPolicy::Auto,
+                                                )
+                                            },
+                                        ) {
+                                            Ok(()) => {}
+                                            Err(restore_error) => log::error!(
+                                                "Failed to restore GPU {} Fan {} to auto after a speed-write failure: {}",
+                                                config.gpu_uuid,
+                                                config.fan_index,
+                                                restore_error
+                                            ),
+                                        }
+                                    }
+                                } else {
+                                    state_guard.set_last_speed(
+                                        &config.gpu_uuid,
+                                        config.fan_index,
+                                        target_pct,
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "Failed to poll GPU {} for curve control: {}",
+                                    config.gpu_uuid,
+                                    error
+                                );
+                                if state_guard.is_controlled(&config.gpu_uuid, config.fan_index) {
+                                    match restore_auto_after_failure(
+                                        &mut state_guard,
+                                        &config.gpu_uuid,
+                                        config.fan_index,
+                                        || {
+                                            monitor.set_fan_policy_by_uuid(
+                                                &config.gpu_uuid,
+                                                config.fan_index,
+                                                FanPolicy::Auto,
+                                            )
+                                        },
+                                    ) {
+                                        Ok(()) => {}
+                                        Err(restore_error) => log::error!(
+                                            "Failed to restore GPU {} Fan {} to auto after a telemetry failure: {}",
+                                            config.gpu_uuid,
+                                            config.fan_index,
+                                            restore_error
+                                        ),
                                     }
                                 }
                             }
@@ -215,7 +370,42 @@ impl CurveDaemon {
         self.running.store(false, Ordering::SeqCst);
 
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                log::error!("Fan curve daemon thread terminated unexpectedly");
+            }
+        }
+
+        self.restore_controlled_fans();
+    }
+
+    fn restore_controlled_fans(&self) {
+        let controlled = match self.state.read() {
+            Ok(state) => state.controlled_fans(),
+            Err(poisoned) => {
+                log::error!("Fan curve state lock was poisoned during shutdown; recovering it");
+                poisoned.into_inner().controlled_fans()
+            }
+        };
+        if controlled.is_empty() {
+            return;
+        }
+
+        let monitor = GpuMonitor::new();
+        for (gpu_uuid, fan_index) in controlled {
+            match monitor.set_fan_policy_by_uuid(&gpu_uuid, fan_index, FanPolicy::Auto) {
+                Ok(()) => match self.state.write() {
+                    Ok(mut state) => state.release_controlled(&gpu_uuid, fan_index),
+                    Err(poisoned) => poisoned
+                        .into_inner()
+                        .release_controlled(&gpu_uuid, fan_index),
+                },
+                Err(error) => log::warn!(
+                    "Failed to restore GPU {} Fan {} to auto: {}",
+                    gpu_uuid,
+                    fan_index,
+                    error
+                ),
+            }
         }
     }
 
@@ -246,11 +436,10 @@ pub fn run_daemon_standalone(config_path: Option<&str>) -> Result<(), String> {
 
     log::info!("Starting fan curve daemon in standalone mode");
 
-    // Load config (reserved for future use with per-fan curve configuration)
-    let _config = if let Some(path) = config_path {
+    let config = if let Some(path) = config_path {
         GuiConfig::load_from(path).map_err(|e| format!("Failed to load config: {}", e))?
     } else {
-        GuiConfig::load()
+        GuiConfig::load().map_err(|e| format!("Failed to load config: {}", e))?
     };
 
     let monitor = GpuMonitor::new();
@@ -269,25 +458,52 @@ pub fn run_daemon_standalone(config_path: Option<&str>) -> Result<(), String> {
     // Create daemon and configure curves from saved config
     let mut daemon = CurveDaemon::new();
 
-    // For standalone mode, we need to load curves from a config file
-    // For now, use default balanced curve for all fans if curve_control is enabled
+    let enabled_curves: Vec<_> = config
+        .curve_control
+        .iter()
+        .filter(|curve| curve.enabled)
+        .collect();
+    if enabled_curves.is_empty() {
+        return Err(
+            "No enabled curve_control entries found; refusing to take over every fan by default"
+                .to_string(),
+        );
+    }
+
     {
         let daemon_state = daemon.state();
         let mut state = daemon_state.write().map_err(|e| e.to_string())?;
 
-        for gpu in &gpus {
-            let fan_count = gpu.fan_speeds.len();
-            for fan_idx in 0..fan_count {
-                // Check if curve control is enabled in config
-                // For standalone, default to using balanced curve
-                let curve = nvctl::domain::FanCurve::default();
-                state.set_curve(gpu.index, fan_idx as u32, curve, true);
-                log::info!(
-                    "Enabled curve control for GPU {} Fan {}",
-                    gpu.index,
-                    fan_idx
-                );
+        for curve_config in enabled_curves {
+            let gpu = gpus
+                .iter()
+                .find(|gpu| gpu.info.uuid == curve_config.gpu_uuid)
+                .ok_or_else(|| {
+                    format!(
+                        "Configured GPU UUID {} was not detected",
+                        curve_config.gpu_uuid
+                    )
+                })?;
+            if curve_config.fan_index as usize >= gpu.fan_speeds.len() {
+                return Err(format!(
+                    "Configured fan {} is out of range for GPU {} ({} fans)",
+                    curve_config.fan_index,
+                    curve_config.gpu_uuid,
+                    gpu.fan_speeds.len()
+                ));
             }
+
+            state.set_curve(
+                curve_config.gpu_uuid.clone(),
+                curve_config.fan_index,
+                curve_config.curve.clone(),
+                true,
+            );
+            log::info!(
+                "Enabled curve control for GPU {} Fan {}",
+                curve_config.gpu_uuid,
+                curve_config.fan_index
+            );
         }
     }
 
@@ -309,23 +525,53 @@ pub fn run_daemon_standalone(config_path: Option<&str>) -> Result<(), String> {
 
     // Wait for shutdown signal
     while running.load(Ordering::SeqCst) {
+        if !daemon.is_running() {
+            return Err("Fan curve daemon stopped unexpectedly".to_string());
+        }
         thread::sleep(Duration::from_millis(100));
     }
 
     // Stop daemon
     daemon.stop();
 
-    // Restore fans to auto mode
-    log::info!("Restoring fans to auto mode...");
-    for gpu in &gpus {
-        let fan_count = gpu.fan_speeds.len();
-        for fan_idx in 0..fan_count {
-            if let Err(e) = monitor.set_fan_policy(gpu.index, fan_idx as u32, FanPolicy::Auto) {
-                log::warn!("Failed to restore fan {} to auto: {}", fan_idx, e);
-            }
-        }
-    }
-
     log::info!("Daemon stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_restore_releases_daemon_ownership() {
+        let mut state = CurveDaemonState::default();
+        state.mark_controlled("GPU-TWO", 1);
+        state.set_last_speed("GPU-TWO", 1, 75);
+
+        restore_auto_after_failure(&mut state, "GPU-TWO", 1, || Ok(())).unwrap();
+
+        assert!(!state.is_controlled("GPU-TWO", 1));
+        assert_eq!(state.last_speed("GPU-TWO", 1), None);
+    }
+
+    #[test]
+    fn failed_restore_keeps_ownership_for_a_later_retry() {
+        let mut state = CurveDaemonState::default();
+        state.mark_controlled("GPU-TWO", 1);
+
+        assert!(restore_auto_after_failure(&mut state, "GPU-TWO", 1, || {
+            Err("policy write failed".to_string())
+        })
+        .is_err());
+        assert!(state.is_controlled("GPU-TWO", 1));
+    }
+
+    #[test]
+    fn running_reset_clears_the_thread_flag() {
+        let running = Arc::new(AtomicBool::new(true));
+        {
+            let _reset = RunningReset(Arc::clone(&running));
+        }
+        assert!(!running.load(Ordering::SeqCst));
+    }
 }

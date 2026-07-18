@@ -4,7 +4,7 @@
 
 use super::types::{Alert, AlertSeverity};
 use crate::error::Result;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 /// Notification channel trait
 pub trait Notifier: Send + Sync {
@@ -30,7 +30,7 @@ impl TerminalNotifier {
     pub fn new() -> Self {
         Self {
             use_stderr: true,
-            use_colors: Self::supports_color(),
+            use_colors: Self::supports_color(true),
         }
     }
 
@@ -38,7 +38,7 @@ impl TerminalNotifier {
     pub fn stdout() -> Self {
         Self {
             use_stderr: false,
-            use_colors: Self::supports_color(),
+            use_colors: Self::supports_color(false),
         }
     }
 
@@ -51,11 +51,16 @@ impl TerminalNotifier {
     }
 
     /// Check if terminal supports colors
-    fn supports_color() -> bool {
-        // Check if we're in a TTY
-        std::env::var("TERM")
-            .map(|term| term != "dumb")
-            .unwrap_or(false)
+    fn supports_color(use_stderr: bool) -> bool {
+        let is_terminal = if use_stderr {
+            io::stderr().is_terminal()
+        } else {
+            io::stdout().is_terminal()
+        };
+        is_terminal
+            && std::env::var("TERM")
+                .map(|term| term != "dumb")
+                .unwrap_or(false)
     }
 
     /// Format alert with colors
@@ -66,13 +71,13 @@ impl TerminalNotifier {
             .or(Some(alert.started_at))
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| {
-                let secs = d.as_secs();
-                let hours = secs / 3600;
-                let mins = (secs % 3600) / 60;
-                let secs = secs % 60;
-                format!("{:02}:{:02}:{:02}", hours, mins, secs)
+                let seconds_of_day = d.as_secs() % (24 * 60 * 60);
+                let hours = seconds_of_day / 3600;
+                let mins = (seconds_of_day % 3600) / 60;
+                let secs = seconds_of_day % 60;
+                format!("{:02}:{:02}:{:02} UTC", hours, mins, secs)
             })
-            .unwrap_or_else(|| "??:??:??".to_string());
+            .unwrap_or_else(|| "??:??:?? UTC".to_string());
 
         format!(
             "[{}] {} GPU {}: {}",
@@ -147,20 +152,38 @@ impl NotificationManager {
 
     /// Send notification to all channels
     pub fn notify_all(&self, alert: &Alert) -> Result<()> {
+        let mut first_error = None;
+        let mut delivered = false;
         for notifier in &self.notifiers {
-            if let Err(e) = notifier.notify(alert) {
-                eprintln!("Failed to notify via {}: {}", notifier.name(), e);
+            match notifier.notify(alert) {
+                Ok(()) => delivered = true,
+                Err(error) => {
+                    eprintln!("Failed to notify via {}: {}", notifier.name(), error);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
-        Ok(())
+
+        if delivered {
+            Ok(())
+        } else {
+            Err(first_error.unwrap_or_else(|| {
+                io::Error::other("no notification channels are configured").into()
+            }))
+        }
     }
 
     /// Send notifications for multiple alerts
     pub fn notify_batch(&self, alerts: &[Alert]) -> Result<()> {
+        let mut first_error = None;
         for alert in alerts {
-            self.notify_all(alert)?;
+            if let Err(error) = self.notify_all(alert) {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Get number of active notifiers
@@ -182,6 +205,30 @@ impl Default for NotificationManager {
 mod tests {
     use super::*;
     use crate::alerts::types::{AlertRule, Condition, MetricType};
+
+    struct FailingNotifier;
+
+    struct SuccessfulNotifier;
+
+    impl Notifier for FailingNotifier {
+        fn notify(&self, _alert: &Alert) -> Result<()> {
+            Err(io::Error::other("notification failed").into())
+        }
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+    }
+
+    impl Notifier for SuccessfulNotifier {
+        fn notify(&self, _alert: &Alert) -> Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "successful"
+        }
+    }
 
     #[test]
     fn test_terminal_notifier_creation() {
@@ -214,6 +261,24 @@ mod tests {
     }
 
     #[test]
+    fn terminal_timestamp_wraps_at_midnight_and_is_labeled_utc() {
+        let rule = AlertRule::new(
+            "test".to_string(),
+            "Test Alert".to_string(),
+            MetricType::Temperature,
+            Condition::GreaterThan(80.0),
+            AlertSeverity::Warning,
+        );
+        let mut alert = Alert::new_pending(&rule, 0, 85.0, 80.0);
+        alert.started_at =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(25 * 3600 + 60 + 2);
+
+        assert!(TerminalNotifier::no_color()
+            .format_alert(&alert)
+            .starts_with("[01:01:02 UTC]"));
+    }
+
+    #[test]
     fn test_notification_manager_creation() {
         let manager = NotificationManager::new();
         assert_eq!(manager.notifier_count(), 0);
@@ -230,6 +295,53 @@ mod tests {
         let mut manager = NotificationManager::new();
         manager.add_notifier(Box::new(TerminalNotifier::new()));
         assert_eq!(manager.notifier_count(), 1);
+    }
+
+    #[test]
+    fn notification_failures_are_returned() {
+        let rule = AlertRule::new(
+            "test".to_string(),
+            "Test Alert".to_string(),
+            MetricType::Temperature,
+            Condition::GreaterThan(80.0),
+            AlertSeverity::Warning,
+        );
+        let alert = Alert::new_pending(&rule, 0, 85.0, 80.0);
+        let mut manager = NotificationManager::new();
+        manager.add_notifier(Box::new(FailingNotifier));
+
+        assert!(manager.notify_all(&alert).is_err());
+    }
+
+    #[test]
+    fn notification_succeeds_when_any_channel_delivers() {
+        let rule = AlertRule::new(
+            "test".to_string(),
+            "Test Alert".to_string(),
+            MetricType::Temperature,
+            Condition::GreaterThan(80.0),
+            AlertSeverity::Warning,
+        );
+        let alert = Alert::new_pending(&rule, 0, 85.0, 80.0);
+        let mut manager = NotificationManager::new();
+        manager.add_notifier(Box::new(FailingNotifier));
+        manager.add_notifier(Box::new(SuccessfulNotifier));
+
+        assert!(manager.notify_all(&alert).is_ok());
+    }
+
+    #[test]
+    fn no_notification_channels_is_an_error() {
+        let rule = AlertRule::new(
+            "test".to_string(),
+            "Test Alert".to_string(),
+            MetricType::Temperature,
+            Condition::GreaterThan(80.0),
+            AlertSeverity::Warning,
+        );
+        let alert = Alert::new_pending(&rule, 0, 85.0, 80.0);
+
+        assert!(NotificationManager::new().notify_all(&alert).is_err());
     }
 
     #[test]

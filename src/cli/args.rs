@@ -26,11 +26,11 @@ pub struct Cli {
     pub config: Option<String>,
 
     /// Target GPU by index (0-based)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with_all = ["gpu_name", "gpu_uuid"])]
     pub gpu: Option<u32>,
 
     /// Target GPU by name (partial match)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with = "gpu_uuid")]
     pub gpu_name: Option<String>,
 
     /// Target GPU by UUID
@@ -139,7 +139,7 @@ pub enum FanCommands {
         policy: FanPolicyArg,
     },
 
-    /// Set fan speed (requires manual policy)
+    /// Set fan speed (switches the target fan to manual policy)
     Speed {
         /// Fan speed percentage (0-100)
         #[arg(value_parser = clap::value_parser!(u8).range(0..=100))]
@@ -205,7 +205,7 @@ pub enum ThermalCommands {
 #[derive(Parser, Debug)]
 pub struct ProcessesArgs {
     /// Sort by memory usage (default)
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "sort_pid")]
     pub sort_memory: bool,
 
     /// Sort by PID
@@ -236,8 +236,8 @@ pub enum ProcessTypeFilter {
 #[derive(Parser, Debug)]
 pub struct ControlArgs {
     /// Control loop interval in seconds
-    #[arg(short, long, default_value = "5")]
-    pub interval: u64,
+    #[arg(short, long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub interval: Option<u64>,
 
     /// Run once and exit (single-use mode)
     #[arg(long)]
@@ -248,16 +248,16 @@ pub struct ControlArgs {
     pub retry: bool,
 
     /// Retry interval in seconds
-    #[arg(long, default_value = "10")]
-    pub retry_interval: u64,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub retry_interval: Option<u64>,
 
     /// Fan curve speed pairs (format: TEMP:SPEED, e.g., 60:50)
     #[arg(long = "speed-pair", value_name = "TEMP:SPEED")]
     pub speed_pairs: Vec<String>,
 
     /// Default fan speed (when below first curve point)
-    #[arg(long, default_value = "30")]
-    pub default_speed: u8,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+    pub default_speed: Option<u8>,
 
     /// Power limit in watts (optional)
     #[arg(long)]
@@ -277,8 +277,8 @@ pub enum AlertCommands {
     /// Start the alert monitoring daemon
     Start {
         /// Check interval in seconds
-        #[arg(short, long, default_value = "5")]
-        interval: u64,
+        #[arg(short, long, value_parser = clap::value_parser!(u64).range(1..))]
+        interval: Option<u64>,
 
         /// Path to alert configuration file
         #[arg(short, long)]
@@ -411,12 +411,18 @@ mod tests {
         .unwrap();
 
         if let Commands::Control(ctrl) = args.command {
-            assert_eq!(ctrl.interval, 10);
+            assert_eq!(ctrl.interval, Some(10));
             assert!(ctrl.single_use);
             assert_eq!(ctrl.speed_pairs.len(), 2);
         } else {
             panic!("Expected Control command");
         }
+    }
+
+    #[test]
+    fn test_cli_rejects_multiple_gpu_selectors() {
+        let result = Cli::try_parse_from(["nvctl", "--gpu", "0", "--gpu-name", "RTX", "info"]);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -438,5 +444,19 @@ mod tests {
         // Should fail for > 100
         let result = Cli::try_parse_from(["nvctl", "thermal", "limit", "150"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn zero_control_and_alert_intervals_are_rejected_by_clap() {
+        assert!(Cli::try_parse_from(["nvctl", "control", "--interval", "0"]).is_err());
+        assert!(Cli::try_parse_from(["nvctl", "control", "--retry-interval", "0"]).is_err());
+        assert!(Cli::try_parse_from(["nvctl", "alerts", "start", "--interval", "0"]).is_err());
+    }
+
+    #[test]
+    fn conflicting_process_sort_modes_are_rejected() {
+        assert!(
+            Cli::try_parse_from(["nvctl", "processes", "--sort-memory", "--sort-pid"]).is_err()
+        );
     }
 }

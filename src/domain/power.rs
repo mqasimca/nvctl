@@ -11,9 +11,26 @@ use std::fmt;
 pub struct PowerLimit(u32);
 
 impl PowerLimit {
-    /// Create a new power limit from watts
+    /// Largest whole-watt value representable as milliwatts in a `u32`.
+    pub const MAX_WATTS: u32 = u32::MAX / 1000;
+
+    /// Create a new power limit from watts, saturating if the milliwatt value
+    /// cannot fit in the underlying representation.
+    ///
+    /// Use [`PowerLimit::try_from_watts`] for untrusted input.
     pub const fn from_watts(watts: u32) -> Self {
-        Self(watts * 1000)
+        Self(watts.saturating_mul(1000))
+    }
+
+    /// Create a power limit from watts, rejecting values that overflow the
+    /// milliwatt representation used by NVML.
+    pub fn try_from_watts(watts: u32) -> Result<Self, DomainError> {
+        watts.checked_mul(1000).map(Self).ok_or_else(|| {
+            DomainError::InvalidValue(format!(
+                "power limit {watts}W exceeds the representable maximum of {}W",
+                Self::MAX_WATTS
+            ))
+        })
     }
 
     /// Create a new power limit from milliwatts
@@ -35,15 +52,11 @@ impl PowerLimit {
 
     /// Validate this power limit against constraints
     pub fn validate(&self, constraints: &PowerConstraints) -> Result<(), DomainError> {
-        let watts = self.as_watts();
-        let min = constraints.min.as_watts();
-        let max = constraints.max.as_watts();
-
-        if watts < min || watts > max {
+        if !constraints.contains(self) {
             return Err(DomainError::InvalidPowerLimit {
-                value: watts,
-                min,
-                max,
+                value: self.as_watts(),
+                min: constraints.min.as_watts(),
+                max: constraints.max.as_watts(),
             });
         }
         Ok(())
@@ -97,6 +110,13 @@ mod tests {
     }
 
     #[test]
+    fn oversized_watt_values_do_not_wrap() {
+        assert!(PowerLimit::try_from_watts(PowerLimit::MAX_WATTS).is_ok());
+        assert!(PowerLimit::try_from_watts(PowerLimit::MAX_WATTS + 1).is_err());
+        assert_eq!(PowerLimit::from_watts(u32::MAX).as_milliwatts(), u32::MAX);
+    }
+
+    #[test]
     fn test_power_limit_display() {
         let limit = PowerLimit::from_watts(350);
         assert_eq!(limit.to_string(), "350W");
@@ -133,5 +153,17 @@ mod tests {
 
         let too_high = PowerLimit::from_watts(500);
         assert!(too_high.validate(&constraints).is_err());
+    }
+
+    #[test]
+    fn validation_uses_exact_milliwatts() {
+        let constraints = PowerConstraints::new(
+            PowerLimit::from_milliwatts(100_500),
+            PowerLimit::from_milliwatts(100_500),
+            PowerLimit::from_milliwatts(100_500),
+        );
+        assert!(PowerLimit::from_milliwatts(100_999)
+            .validate(&constraints)
+            .is_err());
     }
 }

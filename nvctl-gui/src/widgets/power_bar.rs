@@ -33,10 +33,19 @@ impl PowerBar {
 
     /// Get the power usage ratio
     fn ratio(&self) -> f32 {
-        if self.limit.as_watts() == 0 {
+        if self.limit.as_milliwatts() == 0 {
             return 0.0;
         }
-        (self.usage.as_watts() as f32 / self.limit.as_watts() as f32).clamp(0.0, 1.0)
+        (self.usage.as_milliwatts() as f32 / self.limit.as_milliwatts() as f32).clamp(0.0, 1.0)
+    }
+
+    fn default_limit_ratio(&self) -> Option<f32> {
+        let constraints = self.constraints?;
+        let limit = self.limit.as_milliwatts();
+        if limit == 0 {
+            return None;
+        }
+        Some((constraints.default.as_milliwatts() as f32 / limit as f32).clamp(0.0, 1.0))
     }
 }
 
@@ -196,22 +205,18 @@ impl canvas::Program<Message> for PowerBar {
         // ═══════════════════════════════════════════════════════════════════════
         // DEFAULT POWER LIMIT MARKER - White indicator on track
         // ═══════════════════════════════════════════════════════════════════════
-        if let Some(ref constraints) = self.constraints {
-            if constraints.max.as_watts() > 0 && self.limit.as_watts() > 0 {
-                let default_ratio =
-                    constraints.default.as_watts() as f32 / constraints.max.as_watts() as f32;
-                let marker_angle = start_angle + sweep * default_ratio;
+        if let Some(default_ratio) = self.default_limit_ratio() {
+            let marker_angle = start_angle + sweep * default_ratio;
 
-                let marker_x = center.x + radius * marker_angle.cos();
-                let marker_y = center.y + radius * marker_angle.sin();
+            let marker_x = center.x + radius * marker_angle.cos();
+            let marker_y = center.y + radius * marker_angle.sin();
 
-                // White marker dot
-                let marker_glow = Path::circle(Point::new(marker_x, marker_y), 8.0);
-                frame.fill(&marker_glow, colors::with_alpha(colors::TEXT_PRIMARY, 0.3));
+            // White marker dot
+            let marker_glow = Path::circle(Point::new(marker_x, marker_y), 8.0);
+            frame.fill(&marker_glow, colors::with_alpha(colors::TEXT_PRIMARY, 0.3));
 
-                let marker_dot = Path::circle(Point::new(marker_x, marker_y), 4.0);
-                frame.fill(&marker_dot, colors::TEXT_PRIMARY);
-            }
+            let marker_dot = Path::circle(Point::new(marker_x, marker_y), 4.0);
+            frame.fill(&marker_dot, colors::TEXT_PRIMARY);
         }
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -289,5 +294,21 @@ mod tests {
     fn test_power_gauge_zero_limit() {
         let gauge = PowerBar::new(PowerLimit::from_watts(100), PowerLimit::from_watts(0), None);
         assert_eq!(gauge.ratio(), 0.0);
+    }
+
+    #[test]
+    fn default_marker_uses_the_same_scale_as_power_usage() {
+        let constraints = PowerConstraints::new(
+            PowerLimit::from_watts(100),
+            PowerLimit::from_watts(400),
+            PowerLimit::from_watts(200),
+        );
+        let gauge = PowerBar::new(
+            PowerLimit::from_watts(100),
+            PowerLimit::from_watts(250),
+            Some(constraints),
+        );
+
+        assert_eq!(gauge.default_limit_ratio(), Some(0.8));
     }
 }

@@ -135,8 +135,9 @@ fn view_power_status(gpu: &GpuState) -> Element<'_, Message> {
     ]
     .align_y(Alignment::Center);
 
-    let percentage = if gpu.power_limit.as_watts() > 0 {
-        (gpu.power_usage.as_watts() as f32 / gpu.power_limit.as_watts() as f32 * 100.0) as u32
+    let percentage = if gpu.power_limit.as_milliwatts() > 0 {
+        (gpu.power_usage.as_milliwatts() as f64 / gpu.power_limit.as_milliwatts() as f64 * 100.0)
+            .round() as u32
     } else {
         0
     };
@@ -180,7 +181,10 @@ fn view_power_slider<'a>(state: &'a AppState, gpu: &'a GpuState) -> Element<'a, 
         (100, 350)
     };
 
-    let current_watts = gpu.power_limit.as_watts();
+    let current_watts = state
+        .pending_power_limit
+        .unwrap_or(gpu.power_limit)
+        .as_watts();
 
     let slider_row = row![
         text(format!("{}W", min_watts))

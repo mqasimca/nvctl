@@ -160,6 +160,8 @@ mod mock_gpu_monitor {
         assert_eq!(snapshot.index, 0);
         assert_eq!(snapshot.temperature.as_celsius(), 45);
         assert_eq!(snapshot.fan_speeds.len(), 2);
+        assert_eq!(snapshot.fan_policies, vec![FanPolicy::Auto; 2]);
+        assert_eq!(snapshot.power_usage.as_watts(), 150);
         assert_eq!(snapshot.power_limit.as_watts(), 300);
     }
 
@@ -413,7 +415,7 @@ mod fan_curve_tests {
 
         // Balanced should be moderate at mid temps
         let speed = curve.speed_for_temperature(60).as_percentage();
-        assert!(speed >= 40 && speed <= 60);
+        assert!((40..=60).contains(&speed));
     }
 
     /// Test preset performance

@@ -41,15 +41,17 @@ impl<'a> DataSeries<'a> {
 
     /// Set the value range for normalization
     pub fn range(mut self, min: f32, max: f32) -> Self {
-        self.min = min;
-        self.max = max;
+        if min.is_finite() && max.is_finite() && max > min {
+            self.min = min;
+            self.max = max;
+        }
         self
     }
 
     /// Normalize a value to 0.0-1.0 range
     fn normalize(&self, value: f32) -> f32 {
         let range = self.max - self.min;
-        if range <= 0.0 {
+        if !value.is_finite() || !range.is_finite() || range <= 0.0 {
             return 0.5;
         }
         ((value - self.min) / range).clamp(0.0, 1.0)
@@ -113,6 +115,10 @@ impl canvas::Program<Message> for MultiSeriesGraph<'_> {
             ..Text::default()
         });
 
+        if graph_width <= 0.0 || graph_height <= 0.0 {
+            return vec![frame.into_geometry()];
+        }
+
         // ═══════════════════════════════════════════════════════════════════════
         // LEGEND - Show all series with current values (evenly spaced)
         // ═══════════════════════════════════════════════════════════════════════
@@ -133,7 +139,13 @@ impl canvas::Program<Message> for MultiSeriesGraph<'_> {
             frame.fill(&dot, series.color);
 
             // Series name and current value
-            let current = series.data.back().copied().unwrap_or(0.0);
+            let current = series
+                .data
+                .iter()
+                .rev()
+                .copied()
+                .find(|value| value.is_finite())
+                .unwrap_or(0.0);
             let label = format!("{}: {:.0}{}", series.name, current, series.unit);
             let label_x = item_x + dot_radius * 2.0 + 8.0;
 
@@ -320,6 +332,15 @@ mod tests {
         assert!((series.normalize(0.0) - 0.0).abs() < 0.001);
         assert!((series.normalize(50.0) - 0.5).abs() < 0.001);
         assert!((series.normalize(100.0) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn invalid_series_ranges_and_values_stay_finite() {
+        let data = VecDeque::from([50.0]);
+        let series = DataSeries::new(&data, "Test", "%", colors::ACCENT_CYAN).range(20.0, 20.0);
+
+        assert_eq!((series.min, series.max), (0.0, 100.0));
+        assert!(series.normalize(f32::NAN).is_finite());
     }
 
     #[test]

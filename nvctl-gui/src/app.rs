@@ -14,9 +14,92 @@ use crate::views;
 use iced::keyboard::{self, key::Named, Key, Modifiers};
 use iced::widget::{button, column, container, horizontal_space, row, text, Column, Space};
 use iced::{Alignment, Element, Length, Subscription, Task, Theme};
-use nvctl::domain::FanPolicy;
+use nvctl::domain::{FanCurve, FanCurvePoint, FanPolicy, FanSpeed};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+type CurveUpdate = (u32, String, usize, usize, FanCurve, bool);
+
+const CURVE_MIN_TEMP_C: i32 = 20;
+const CURVE_MAX_TEMP_C: i32 = 100;
+
+fn move_curve_point(
+    curve: &FanCurve,
+    index: usize,
+    temperature: i32,
+    speed: u8,
+) -> Result<FanCurve, String> {
+    let mut points = curve.points().to_vec();
+    if index >= points.len() {
+        return Err("Curve point is no longer available".to_string());
+    }
+
+    // Do not let a dragged point cross its neighbours. Apart from preserving the
+    // curve invariants, this keeps the canvas' drag index attached to the same point.
+    let min_temperature = points
+        .get(index.wrapping_sub(1))
+        .filter(|_| index > 0)
+        .map_or(CURVE_MIN_TEMP_C, |point| {
+            point.temperature.saturating_add(1).max(CURVE_MIN_TEMP_C)
+        });
+    let max_temperature = points.get(index + 1).map_or(CURVE_MAX_TEMP_C, |point| {
+        point.temperature.saturating_sub(1).min(CURVE_MAX_TEMP_C)
+    });
+    if min_temperature > max_temperature {
+        return Err("Neighbouring points leave no editable temperature range".to_string());
+    }
+
+    let min_speed = if index == 0 {
+        curve.default_speed().as_percentage()
+    } else {
+        points[index - 1].speed.as_percentage()
+    };
+    let max_speed = points
+        .get(index + 1)
+        .map_or(FanSpeed::MAX, |point| point.speed.as_percentage());
+
+    points[index] = FanCurvePoint::new(
+        temperature.clamp(min_temperature, max_temperature),
+        FanSpeed::from_percentage_clamped(speed.clamp(min_speed, max_speed)),
+    );
+
+    FanCurve::new(points, curve.default_speed()).map_err(|error| error.to_string())
+}
+
+fn add_curve_point(
+    curve: &FanCurve,
+    temperature: i32,
+    speed: u8,
+) -> Result<(FanCurve, i32, u8), String> {
+    let temperature = temperature.clamp(CURVE_MIN_TEMP_C, CURVE_MAX_TEMP_C);
+    let mut points = curve.points().to_vec();
+    let insertion_index = points.partition_point(|point| point.temperature < temperature);
+
+    if points
+        .get(insertion_index)
+        .is_some_and(|point| point.temperature == temperature)
+    {
+        return Err(format!("A curve point already exists at {temperature}°C"));
+    }
+
+    let min_speed = if insertion_index == 0 {
+        curve.default_speed().as_percentage()
+    } else {
+        points[insertion_index - 1].speed.as_percentage()
+    };
+    let max_speed = points
+        .get(insertion_index)
+        .map_or(FanSpeed::MAX, |point| point.speed.as_percentage());
+    let speed = speed.clamp(min_speed, max_speed);
+    points.insert(
+        insertion_index,
+        FanCurvePoint::new(temperature, FanSpeed::from_percentage_clamped(speed)),
+    );
+
+    FanCurve::new(points, curve.default_speed())
+        .map(|curve| (curve, temperature, speed))
+        .map_err(|error| error.to_string())
+}
 
 /// Main application
 pub struct NvctlGui {
@@ -32,8 +115,14 @@ pub struct NvctlGui {
     /// System tray handle (optional)
     tray: Option<TrayHandle>,
 
+    /// Main window identifier, used for tray hide/show behavior.
+    window_id: Option<iced::window::Id>,
+
     /// GUI configuration (fan labels, preferences)
     config: GuiConfig,
+
+    /// False when startup found a malformed config that must not be overwritten
+    config_writable: bool,
 
     /// Fan curve daemon for automatic fan control
     curve_daemon: Arc<RwLock<CurveDaemon>>,
@@ -46,12 +135,22 @@ impl NvctlGui {
         let gpus = monitor.detect_gpus();
         let profile_service = ProfileService::new();
 
-        // Load GUI config (fan labels, etc.)
-        let mut config = GuiConfig::load();
+        // Never overwrite a malformed user config with defaults.
+        let (mut config, config_load_error) = match GuiConfig::load() {
+            Ok(config) => (config, None),
+            Err(error) => (GuiConfig::default(), Some(error)),
+        };
+        let config_writable = config_load_error.is_none();
 
         // Detect cooler targets for each GPU and store in config
         for gpu in &gpus {
-            let targets = monitor.get_cooler_targets(gpu.index);
+            let targets = match monitor.get_cooler_targets(gpu.index) {
+                Ok(targets) => targets,
+                Err(error) => {
+                    log::warn!("Could not detect cooler targets: {}", error);
+                    continue;
+                }
+            };
             let total_fans = targets.len() as u32;
             let gpu_config = config.get_gpu_fan_config(&gpu.info.uuid);
 
@@ -61,12 +160,15 @@ impl NvctlGui {
         }
 
         // Save updated config with detected targets
-        if let Err(e) = config.save() {
-            log::warn!("Failed to save config: {}", e);
+        if config_load_error.is_none() {
+            if let Err(e) = config.save() {
+                log::warn!("Failed to save config: {}", e);
+            }
         }
 
         let mut state = AppState::new();
         state.gpus = gpus;
+        state.sidebar_expanded = config.preferences.sidebar_expanded;
 
         // Initialize fan curves for the first GPU
         if let Some(gpu) = state.gpus.first() {
@@ -75,33 +177,433 @@ impl NvctlGui {
 
         // Load profiles into state
         state.profiles = profile_service.list().into_iter().cloned().collect();
-        state.active_profile = profile_service.active_name().map(String::from);
+        state.active_profile = None;
+        let startup_profile = profile_service
+            .default_profile()
+            .map(|profile| profile.name.clone());
 
-        if !monitor.is_available() {
+        if let Some(error) = config_load_error {
+            state.set_notification(Notification::error(format!(
+                "GUI config was not loaded and was left unchanged: {}",
+                error
+            )));
+        } else if !monitor.is_available() {
             state.set_notification(Notification::warning(
-                "NVML not available. Running in demo mode.",
+                "NVML is not available; GPU telemetry and controls are disabled.",
+            ));
+        } else if state.gpus.is_empty() {
+            state.set_notification(Notification::error(
+                "No GPUs with complete telemetry were detected",
             ));
         }
 
         // Start system tray
-        let tray = start_tray();
+        let tray = config.preferences.enable_tray.then(start_tray).flatten();
         if tray.is_none() {
             log::info!("System tray not available on this system");
         }
 
-        // Create curve daemon (not started yet)
-        let curve_daemon = Arc::new(RwLock::new(CurveDaemon::new()));
+        // Restore only explicitly persisted curve controls.
+        let mut daemon = CurveDaemon::new();
+        {
+            let daemon_state = daemon.state();
+            if let Ok(mut daemon_state) = daemon_state.write() {
+                for curve_config in &config.curve_control {
+                    let Some(gpu) = state
+                        .gpus
+                        .iter()
+                        .find(|gpu| gpu.info.uuid == curve_config.gpu_uuid)
+                    else {
+                        log::warn!(
+                            "Ignoring curve for unavailable GPU {}",
+                            curve_config.gpu_uuid
+                        );
+                        continue;
+                    };
+                    let gpu_index = gpu.index;
+                    let fan_count = gpu.fan_speeds.len();
+                    if curve_config.fan_index as usize >= fan_count {
+                        log::warn!(
+                            "Ignoring out-of-range fan {} for GPU {}",
+                            curve_config.fan_index,
+                            curve_config.gpu_uuid
+                        );
+                        continue;
+                    }
+
+                    state.set_gpu_editor_curve(
+                        gpu_index,
+                        fan_count,
+                        curve_config.fan_index as usize,
+                        curve_config.curve.clone(),
+                        curve_config.enabled,
+                    );
+                    daemon_state.set_curve(
+                        curve_config.gpu_uuid.clone(),
+                        curve_config.fan_index,
+                        curve_config.curve.clone(),
+                        curve_config.enabled,
+                    );
+                }
+            };
+        }
+        if daemon
+            .state()
+            .read()
+            .map(|state| state.has_enabled_curves())
+            .unwrap_or(false)
+        {
+            daemon.start();
+        }
+        let curve_daemon = Arc::new(RwLock::new(daemon));
 
         let app = Self {
             state,
             monitor,
             profile_service,
             tray,
+            window_id: None,
             config,
+            config_writable,
             curve_daemon,
         };
 
-        (app, Task::none())
+        let startup_task = startup_profile
+            .map(|name| {
+                Task::done(Message::Profile(crate::message::ProfileMessage::Selected(
+                    name,
+                )))
+            })
+            .unwrap_or_else(Task::none);
+
+        (app, startup_task)
+    }
+
+    fn save_gui_config_candidate(&self, candidate: &GuiConfig) -> Result<(), String> {
+        if !self.config_writable {
+            return Err(
+                "the existing GUI config is invalid; fix or move it before saving settings"
+                    .to_string(),
+            );
+        }
+        candidate.save()
+    }
+
+    /// Persist and install curve changes as one operation. Both the in-memory
+    /// daemon state and the config file stay unchanged if persistence fails.
+    fn apply_curve_updates(&mut self, updates: &[CurveUpdate]) -> Result<(), String> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        if !self.config_writable {
+            return Err(
+                "the existing GUI config is invalid; fix or move it before saving settings"
+                    .to_string(),
+            );
+        }
+
+        let mut next_config = self.config.clone();
+        for (_, gpu_uuid, _, fan_index, curve, enabled) in updates {
+            next_config.set_curve_control(gpu_uuid, *fan_index as u32, curve.clone(), *enabled);
+        }
+
+        let mut daemon = self
+            .curve_daemon
+            .write()
+            .map_err(|_| "Fan curve daemon lock is poisoned".to_string())?;
+        let daemon_state = daemon.state();
+        let has_enabled = {
+            let mut state = daemon_state
+                .write()
+                .map_err(|_| "Fan curve state lock is poisoned".to_string())?;
+            let previous_state = state.clone();
+            for (_, gpu_uuid, _, fan_index, curve, enabled) in updates {
+                state.set_curve(gpu_uuid.clone(), *fan_index as u32, curve.clone(), *enabled);
+            }
+            if let Err(error) = next_config.save() {
+                *state = previous_state;
+                return Err(error);
+            }
+            state.has_enabled_curves()
+        };
+
+        self.config = next_config;
+        if has_enabled && !daemon.is_running() {
+            daemon.start();
+            log::info!("Fan curve daemon started");
+        } else if !has_enabled && daemon.is_running() {
+            daemon.stop();
+            log::info!("Fan curve daemon stopped");
+        }
+        drop(daemon);
+
+        for (gpu_index, _, fan_count, fan_index, curve, enabled) in updates {
+            self.state.set_gpu_editor_curve(
+                *gpu_index,
+                *fan_count,
+                *fan_index,
+                curve.clone(),
+                *enabled,
+            );
+        }
+        Ok(())
+    }
+
+    fn toggle_sidebar(&mut self) {
+        self.state.sidebar_expanded = !self.state.sidebar_expanded;
+        let mut next_config = self.config.clone();
+        next_config.preferences.sidebar_expanded = self.state.sidebar_expanded;
+        match self.save_gui_config_candidate(&next_config) {
+            Ok(()) => self.config = next_config,
+            Err(error) => {
+                log::warn!("Failed to persist sidebar preference: {}", error);
+                self.state.set_notification(Notification::warning(format!(
+                    "Sidebar changed for this session but could not be saved: {}",
+                    error
+                )));
+            }
+        }
+    }
+
+    fn apply_profile(&mut self, name: &str) -> Result<(), String> {
+        let profile = self
+            .profile_service
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("Profile '{}' no longer exists", name))?;
+        let gpu_indices = self.state.target_gpu_indices();
+        if gpu_indices.is_empty() {
+            return Err("No GPU selected".to_string());
+        }
+
+        let mut targets = Vec::new();
+        for gpu in self
+            .state
+            .gpus
+            .iter()
+            .filter(|gpu| gpu_indices.contains(&gpu.index))
+        {
+            let settings = profile
+                .gpu_settings
+                .get(&gpu.info.uuid)
+                .or_else(|| profile.gpu_settings.get("default"))
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Profile '{}' has no settings for GPU {}",
+                        name, gpu.info.uuid
+                    )
+                })?;
+
+            if settings.apply_fan_curve {
+                if gpu.fan_speeds.is_empty() {
+                    return Err(format!(
+                        "Profile '{}' enables fan curves but GPU {} exposes no controllable fans",
+                        name, gpu.info.uuid
+                    ));
+                }
+                if settings.fan_curve.is_none() && settings.fan_curves.is_empty() {
+                    return Err(format!(
+                        "Profile '{}' enables fan curves but contains none",
+                        name
+                    ));
+                }
+                if !settings.fan_curves.is_empty()
+                    && settings.fan_curves.len() != gpu.fan_speeds.len()
+                {
+                    return Err(format!(
+                        "Profile '{}' has {} fan curves for GPU {} but the GPU exposes {} fans",
+                        name,
+                        settings.fan_curves.len(),
+                        gpu.info.uuid,
+                        gpu.fan_speeds.len()
+                    ));
+                }
+            }
+            if settings.apply_power_limit {
+                let limit = settings.power_limit.ok_or_else(|| {
+                    format!("Profile '{}' enables a power limit but contains none", name)
+                })?;
+                let constraints = gpu.power_constraints.ok_or_else(|| {
+                    format!("GPU {} does not expose power constraints", gpu.info.uuid)
+                })?;
+                if !constraints.contains(&limit) {
+                    return Err(format!(
+                        "Profile power limit {} is outside GPU {} range {}",
+                        limit, gpu.info.uuid, constraints
+                    ));
+                }
+            }
+
+            let old_acoustic_limit = if let Some(target) = settings.acoustic_limit {
+                let limits = self
+                    .monitor
+                    .acoustic_limits_by_uuid(&gpu.info.uuid)?
+                    .ok_or_else(|| {
+                        format!("GPU {} does not support acoustic limits", gpu.info.uuid)
+                    })?;
+                let (Some(current), Some(min), Some(max)) =
+                    (limits.current, limits.min, limits.max)
+                else {
+                    return Err(format!(
+                        "GPU {} does not expose complete acoustic limits",
+                        gpu.info.uuid
+                    ));
+                };
+                if target < min || target > max {
+                    return Err(format!(
+                        "Profile acoustic limit {} is outside GPU {} range {}-{}",
+                        target, gpu.info.uuid, min, max
+                    ));
+                }
+                Some(current)
+            } else {
+                None
+            };
+
+            targets.push((
+                gpu.index,
+                gpu.info.uuid.clone(),
+                gpu.fan_speeds.len(),
+                gpu.power_limit,
+                old_acoustic_limit,
+                settings,
+            ));
+        }
+
+        // Power changes are rolled back if a later selected GPU fails.
+        let mut applied_power: Vec<(String, nvctl::domain::PowerLimit)> = Vec::new();
+        for (_, gpu_uuid, _, old_limit, _, settings) in &targets {
+            if settings.apply_power_limit {
+                if let Some(limit) = settings.power_limit {
+                    if let Err(error) = self.monitor.set_power_limit_by_uuid(gpu_uuid, limit) {
+                        for (rollback_uuid, rollback_limit) in applied_power.into_iter().rev() {
+                            if let Err(rollback_error) = self
+                                .monitor
+                                .set_power_limit_by_uuid(&rollback_uuid, rollback_limit)
+                            {
+                                log::error!(
+                                    "Failed to roll back GPU {} profile power limit: {}",
+                                    rollback_uuid,
+                                    rollback_error
+                                );
+                            }
+                        }
+                        return Err(format!("Failed to apply profile power limit: {}", error));
+                    }
+                    applied_power.push((gpu_uuid.clone(), *old_limit));
+                }
+            }
+        }
+
+        // Acoustic changes are also transactional and are restored before
+        // power if any later setting cannot be applied.
+        let mut applied_acoustic: Vec<(String, nvctl::domain::Temperature)> = Vec::new();
+        for (_, gpu_uuid, _, _, old_acoustic_limit, settings) in &targets {
+            if let Some(limit) = settings.acoustic_limit {
+                if let Err(error) = self.monitor.set_acoustic_limit_by_uuid(gpu_uuid, limit) {
+                    for (rollback_uuid, rollback_limit) in applied_acoustic.into_iter().rev() {
+                        if let Err(rollback_error) = self
+                            .monitor
+                            .set_acoustic_limit_by_uuid(&rollback_uuid, rollback_limit)
+                        {
+                            log::error!(
+                                "Failed to roll back GPU {} acoustic limit: {}",
+                                rollback_uuid,
+                                rollback_error
+                            );
+                        }
+                    }
+                    for (rollback_uuid, rollback_limit) in applied_power.into_iter().rev() {
+                        if let Err(rollback_error) = self
+                            .monitor
+                            .set_power_limit_by_uuid(&rollback_uuid, rollback_limit)
+                        {
+                            log::error!(
+                                "Failed to roll back GPU {} profile power limit: {}",
+                                rollback_uuid,
+                                rollback_error
+                            );
+                        }
+                    }
+                    return Err(format!("Failed to apply profile acoustic limit: {}", error));
+                }
+                let Some(rollback_limit) = *old_acoustic_limit else {
+                    return Err(format!(
+                        "GPU {} lost its acoustic rollback value during profile validation",
+                        gpu_uuid
+                    ));
+                };
+                applied_acoustic.push((gpu_uuid.clone(), rollback_limit));
+            }
+        }
+
+        let mut curve_updates = Vec::new();
+        for (gpu_index, gpu_uuid, fan_count, _, _, settings) in &targets {
+            if settings.apply_fan_curve {
+                for (fan_index, (curve, enabled)) in settings
+                    .resolved_fan_curves(*fan_count)
+                    .into_iter()
+                    .enumerate()
+                {
+                    curve_updates.push((
+                        *gpu_index,
+                        gpu_uuid.clone(),
+                        *fan_count,
+                        fan_index,
+                        curve,
+                        enabled,
+                    ));
+                }
+            }
+        }
+        if let Err(error) = self.apply_curve_updates(&curve_updates) {
+            for (rollback_uuid, rollback_limit) in applied_acoustic.into_iter().rev() {
+                if let Err(rollback_error) = self
+                    .monitor
+                    .set_acoustic_limit_by_uuid(&rollback_uuid, rollback_limit)
+                {
+                    log::error!(
+                        "Failed to roll back GPU {} acoustic limit after profile error: {}",
+                        rollback_uuid,
+                        rollback_error
+                    );
+                }
+            }
+            for (rollback_uuid, rollback_limit) in applied_power.into_iter().rev() {
+                if let Err(rollback_error) = self
+                    .monitor
+                    .set_power_limit_by_uuid(&rollback_uuid, rollback_limit)
+                {
+                    log::error!(
+                        "Failed to roll back GPU {} power after profile error: {}",
+                        rollback_uuid,
+                        rollback_error
+                    );
+                }
+            }
+            return Err(format!("Failed to apply profile fan curves: {}", error));
+        }
+
+        for (gpu_index, gpu_uuid, _, _, _, settings) in targets {
+            if settings.apply_power_limit {
+                if let Some(limit) = settings.power_limit {
+                    if let Some(gpu) = self
+                        .state
+                        .gpus
+                        .iter_mut()
+                        .find(|gpu| gpu.info.uuid == gpu_uuid)
+                    {
+                        gpu.power_limit = limit;
+                    }
+                }
+                self.state.set_gpu_pending_power(gpu_index, None);
+            }
+        }
+
+        self.profile_service.set_active(Some(name.to_string()));
+        self.state.active_profile = Some(name.to_string());
+        Ok(())
     }
 
     /// Update application state based on a message
@@ -114,7 +616,7 @@ impl NvctlGui {
             }
 
             Message::SidebarToggled => {
-                self.state.sidebar_expanded = !self.state.sidebar_expanded;
+                self.toggle_sidebar();
                 Task::none()
             }
 
@@ -125,15 +627,13 @@ impl NvctlGui {
                 } else {
                     match shortcut {
                         KeyboardShortcut::Refresh => {
-                            self.state.gpus = self.monitor.detect_gpus();
-                            if self.state.selected_gpu >= self.state.gpus.len() {
-                                self.state.selected_gpu = 0;
-                            }
+                            self.state
+                                .replace_gpus_preserving_selection(self.monitor.detect_gpus());
                             self.state
                                 .set_notification(Notification::success("GPU data refreshed"));
                         }
                         KeyboardShortcut::ToggleSidebar => {
-                            self.state.sidebar_expanded = !self.state.sidebar_expanded;
+                            self.toggle_sidebar();
                         }
                         _ => {}
                     }
@@ -144,10 +644,7 @@ impl NvctlGui {
             // GPU selection
             Message::GpuSelected(index) => {
                 if index < self.state.gpus.len() {
-                    self.state.selected_gpu = index;
-                    // Initialize curves for the new GPU's fan count
-                    let fan_count = self.state.gpus[index].fan_speeds.len();
-                    self.state.init_curves_for_gpu(fan_count);
+                    self.state.select_gpu(index);
                 }
                 Task::none()
             }
@@ -164,22 +661,95 @@ impl NvctlGui {
             }
 
             Message::RefreshGpus => {
-                self.state.gpus = self.monitor.detect_gpus();
-                if self.state.selected_gpu >= self.state.gpus.len() {
-                    self.state.selected_gpu = 0;
-                }
+                self.state
+                    .replace_gpus_preserving_selection(self.monitor.detect_gpus());
                 Task::none()
             }
 
             // Polling
+            Message::WindowOpened(window_id) => {
+                self.window_id = Some(window_id);
+                if self.config.preferences.start_minimized
+                    && self.tray.as_ref().is_some_and(TrayHandle::is_running)
+                {
+                    return iced::window::change_mode(window_id, iced::window::Mode::Hidden);
+                }
+                Task::none()
+            }
+
             Message::Tick(_now) => {
-                // Collect GPU indices first to avoid borrow issues
-                let gpu_indices: Vec<u32> = self.state.gpus.iter().map(|g| g.index).collect();
+                // Poll by UUID so an NVML re-enumeration cannot attach one
+                // physical GPU's telemetry to another GPU's state.
+                let gpu_uuids: Vec<String> = self
+                    .state
+                    .gpus
+                    .iter()
+                    .map(|gpu| gpu.info.uuid.clone())
+                    .collect();
 
                 // Poll all GPUs
-                for index in gpu_indices {
-                    if let Some(snapshot) = self.monitor.poll_gpu(index) {
-                        self.state.update_gpu(snapshot);
+                for gpu_uuid in gpu_uuids {
+                    match self.monitor.poll_gpu_by_uuid(&gpu_uuid) {
+                        Ok(snapshot) => self.state.update_gpu_by_uuid(&gpu_uuid, snapshot),
+                        Err(error) => {
+                            // Preserve the previous valid snapshot; never replace it with zeroes.
+                            log::warn!("{}", error);
+                        }
+                    }
+                }
+
+                // A panic in the background curve worker must not silently
+                // leave fans fixed at their last manual speed.
+                let curve_restarted = match self.curve_daemon.write() {
+                    Ok(mut daemon) => {
+                        let daemon_state = daemon.state();
+                        let has_enabled_curves = match daemon_state.read() {
+                            Ok(state) => state.has_enabled_curves(),
+                            Err(poisoned) => {
+                                log::error!("Fan curve state lock is poisoned; recovering it");
+                                poisoned.into_inner().has_enabled_curves()
+                            }
+                        };
+                        if has_enabled_curves && !daemon.is_running() {
+                            daemon.start();
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Err(_) => {
+                        log::error!("Fan curve daemon lock is poisoned");
+                        false
+                    }
+                };
+                if curve_restarted {
+                    log::error!("Fan curve daemon stopped unexpectedly and was restarted");
+                    if !self
+                        .state
+                        .notification
+                        .as_ref()
+                        .is_some_and(|notification| {
+                            notification.level == crate::state::NotificationLevel::Error
+                        })
+                    {
+                        self.state.set_notification(Notification::warning(
+                            "Fan curve control stopped unexpectedly and was restarted",
+                        ));
+                    }
+                }
+
+                // Never leave the only window hidden if the tray service exits.
+                if self.tray.as_ref().is_some_and(|tray| !tray.is_running()) {
+                    log::warn!("System tray service stopped; restoring the main window");
+                    self.tray = None;
+                    self.state.set_notification(Notification::warning(
+                        "System tray stopped; the main window was restored",
+                    ));
+                    if let Some(window_id) = self.window_id {
+                        return Task::batch([
+                            iced::window::change_mode(window_id, iced::window::Mode::Windowed),
+                            iced::window::minimize(window_id, false),
+                        ]);
                     }
                 }
 
@@ -193,6 +763,14 @@ impl NvctlGui {
                     // Check for tray quit request
                     if tray.quit_requested() {
                         return iced::exit();
+                    }
+                    if tray.take_show_window_request() {
+                        if let Some(window_id) = self.window_id {
+                            return Task::batch([
+                                iced::window::change_mode(window_id, iced::window::Mode::Windowed),
+                                iced::window::minimize(window_id, false),
+                            ]);
+                        }
                     }
                 }
 
@@ -217,27 +795,98 @@ impl NvctlGui {
 
                 match msg {
                     FanControlMessage::PolicyChanged(fan_idx, policy) => {
-                        // Get GPU indices to apply to
                         let gpu_indices = self.state.target_gpu_indices();
+                        let mut targets = Vec::new();
+                        for gpu in self
+                            .state
+                            .gpus
+                            .iter()
+                            .filter(|gpu| gpu_indices.contains(&gpu.index))
+                        {
+                            if fan_idx as usize >= gpu.fan_speeds.len() {
+                                self.state.set_notification(Notification::error(format!(
+                                    "Fan {} is out of range for GPU {}",
+                                    fan_idx + 1,
+                                    gpu.info.uuid
+                                )));
+                                return Task::none();
+                            }
+                            let Some(old_policy) =
+                                gpu.fan_policies.get(fan_idx as usize).copied().flatten()
+                            else {
+                                self.state.set_notification(Notification::error(format!(
+                                    "Fan policy control is unavailable for GPU {} Fan {}",
+                                    gpu.info.uuid,
+                                    fan_idx + 1
+                                )));
+                                return Task::none();
+                            };
+                            targets.push((
+                                gpu.info.uuid.clone(),
+                                old_policy,
+                                gpu.fan_speeds[fan_idx as usize],
+                            ));
+                        }
+                        if targets.is_empty() {
+                            self.state
+                                .set_notification(Notification::error("No GPU selected"));
+                            return Task::none();
+                        }
 
-                        for gpu_index in gpu_indices {
-                            match self.monitor.set_fan_policy(gpu_index, fan_idx, policy) {
-                                Ok(()) => {
-                                    // Update state on success
-                                    if let Some(gpu) =
-                                        self.state.gpus.iter_mut().find(|g| g.index == gpu_index)
+                        let mut applied: Vec<(String, FanPolicy, FanSpeed)> = Vec::new();
+                        for (gpu_uuid, old_policy, old_speed) in &targets {
+                            if let Err(error) = self
+                                .monitor
+                                .set_fan_policy_by_uuid(gpu_uuid, fan_idx, policy)
+                            {
+                                for (rollback_uuid, rollback_policy, rollback_speed) in
+                                    applied.into_iter().rev()
+                                {
+                                    if let Err(rollback_error) =
+                                        self.monitor.set_fan_policy_by_uuid(
+                                            &rollback_uuid,
+                                            fan_idx,
+                                            rollback_policy,
+                                        )
                                     {
-                                        if let Some(fan_policy) =
-                                            gpu.fan_policies.get_mut(fan_idx as usize)
+                                        log::error!(
+                                            "Failed to roll back GPU {} Fan {} policy: {}",
+                                            rollback_uuid,
+                                            fan_idx,
+                                            rollback_error
+                                        );
+                                    }
+                                    if rollback_policy == FanPolicy::Manual {
+                                        if let Err(rollback_error) =
+                                            self.monitor.set_fan_speed_by_uuid(
+                                                &rollback_uuid,
+                                                fan_idx,
+                                                rollback_speed,
+                                            )
                                         {
-                                            *fan_policy = policy;
+                                            log::error!(
+                                                "Failed to roll back GPU {} Fan {} speed: {}",
+                                                rollback_uuid,
+                                                fan_idx,
+                                                rollback_error
+                                            );
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    self.state.set_notification(Notification::error(e));
-                                    return Task::none();
-                                }
+                                self.state.set_notification(Notification::error(error));
+                                return Task::none();
+                            }
+                            applied.push((gpu_uuid.clone(), *old_policy, *old_speed));
+                        }
+                        for (gpu_uuid, _, _) in targets {
+                            if let Some(fan_policy) = self
+                                .state
+                                .gpus
+                                .iter_mut()
+                                .find(|gpu| gpu.info.uuid == gpu_uuid)
+                                .and_then(|gpu| gpu.fan_policies.get_mut(fan_idx as usize))
+                            {
+                                *fan_policy = Some(policy);
                             }
                         }
 
@@ -248,38 +897,134 @@ impl NvctlGui {
                         )));
                     }
                     FanControlMessage::SpeedChanged(fan_idx, speed) => {
-                        // Get GPU indices to apply to
                         let gpu_indices = self.state.target_gpu_indices();
+                        let mut targets = Vec::new();
+                        for gpu in self
+                            .state
+                            .gpus
+                            .iter()
+                            .filter(|gpu| gpu_indices.contains(&gpu.index))
+                        {
+                            let Some(old_speed) = gpu.fan_speeds.get(fan_idx as usize) else {
+                                self.state.set_notification(Notification::error(format!(
+                                    "Fan {} is out of range for GPU {}",
+                                    fan_idx + 1,
+                                    gpu.info.uuid
+                                )));
+                                return Task::none();
+                            };
+                            let Some(old_policy) =
+                                gpu.fan_policies.get(fan_idx as usize).copied().flatten()
+                            else {
+                                self.state.set_notification(Notification::error(format!(
+                                    "Fan policy control is unavailable for GPU {} Fan {}",
+                                    gpu.info.uuid,
+                                    fan_idx + 1
+                                )));
+                                return Task::none();
+                            };
+                            targets.push((gpu.info.uuid.clone(), old_policy, *old_speed));
+                        }
+                        if targets.is_empty() {
+                            self.state
+                                .set_notification(Notification::error("No GPU selected"));
+                            return Task::none();
+                        }
 
-                        for gpu_index in gpu_indices {
-                            match self.monitor.set_fan_speed(gpu_index, fan_idx, speed) {
-                                Ok(()) => {
-                                    // Update state on success
-                                    if let Some(gpu) =
-                                        self.state.gpus.iter_mut().find(|g| g.index == gpu_index)
-                                    {
-                                        if let Some(fan_speed) =
-                                            gpu.fan_speeds.get_mut(fan_idx as usize)
+                        let mut applied: Vec<(String, FanPolicy, FanSpeed)> = Vec::new();
+                        for (gpu_uuid, old_policy, old_speed) in &targets {
+                            if let Err(error) =
+                                self.monitor.set_fan_speed_by_uuid(gpu_uuid, fan_idx, speed)
+                            {
+                                for (rollback_uuid, rollback_policy, rollback_speed) in
+                                    applied.into_iter().rev()
+                                {
+                                    if rollback_policy == FanPolicy::Auto {
+                                        if let Err(rollback_error) =
+                                            self.monitor.set_fan_speed_by_uuid(
+                                                &rollback_uuid,
+                                                fan_idx,
+                                                rollback_speed,
+                                            )
                                         {
-                                            *fan_speed = speed;
+                                            log::error!(
+                                                "Failed to roll back GPU {} Fan {} speed: {}",
+                                                rollback_uuid,
+                                                fan_idx,
+                                                rollback_error
+                                            );
+                                        }
+                                    }
+                                    if let Err(rollback_error) =
+                                        self.monitor.set_fan_policy_by_uuid(
+                                            &rollback_uuid,
+                                            fan_idx,
+                                            rollback_policy,
+                                        )
+                                    {
+                                        log::error!(
+                                            "Failed to roll back GPU {} Fan {} policy: {}",
+                                            rollback_uuid,
+                                            fan_idx,
+                                            rollback_error
+                                        );
+                                    }
+                                    if rollback_policy == FanPolicy::Manual {
+                                        if let Err(rollback_error) =
+                                            self.monitor.set_fan_speed_by_uuid(
+                                                &rollback_uuid,
+                                                fan_idx,
+                                                rollback_speed,
+                                            )
+                                        {
+                                            log::error!(
+                                                "Failed to roll back GPU {} Fan {} speed: {}",
+                                                rollback_uuid,
+                                                fan_idx,
+                                                rollback_error
+                                            );
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    self.state.set_notification(Notification::error(e));
-                                    return Task::none();
+                                self.state.set_notification(Notification::error(error));
+                                return Task::none();
+                            }
+                            applied.push((gpu_uuid.clone(), *old_policy, *old_speed));
+                        }
+                        for (gpu_uuid, _, _) in targets {
+                            if let Some(gpu) = self
+                                .state
+                                .gpus
+                                .iter_mut()
+                                .find(|gpu| gpu.info.uuid == gpu_uuid)
+                            {
+                                if let Some(fan_speed) = gpu.fan_speeds.get_mut(fan_idx as usize) {
+                                    *fan_speed = speed;
+                                }
+                                if let Some(fan_policy) = gpu.fan_policies.get_mut(fan_idx as usize)
+                                {
+                                    *fan_policy = Some(FanPolicy::Manual);
                                 }
                             }
                         }
+                        self.state.set_notification(Notification::success(format!(
+                            "Fan {} speed set to {}%",
+                            fan_idx + 1,
+                            speed.as_percentage()
+                        )));
                     }
                     FanControlMessage::SelectCurveFan(fan_idx) => {
-                        self.state.selected_curve_fan = fan_idx;
+                        if fan_idx < self.state.editing_curves.len() {
+                            self.state.selected_curve_fan = fan_idx;
+                        } else {
+                            self.state.set_notification(Notification::error(format!(
+                                "Fan {} is not available",
+                                fan_idx + 1
+                            )));
+                        }
                     }
                     FanControlMessage::CurvePointMoved { index, temp, speed } => {
-                        // Update curve point for selected fan
                         let fan_idx = self.state.selected_curve_fan;
-
-                        // Get the current curve (editing or from GPU state)
                         let current_curve = self
                             .state
                             .editing_curves
@@ -292,36 +1037,25 @@ impl NvctlGui {
                             })
                             .unwrap_or_default();
 
-                        // Clone points and update the moved point
-                        let mut points: Vec<_> = current_curve.points().to_vec();
-                        if let Some(point) = points.get_mut(index) {
-                            // Clamp values to valid range
-                            let clamped_temp = temp.clamp(20, 100);
-                            let clamped_speed = speed.clamp(0, 100);
+                        if fan_idx >= self.state.editing_curves.len() {
+                            self.state.set_notification(Notification::error(format!(
+                                "Fan {} is not available",
+                                fan_idx + 1
+                            )));
+                            return Task::none();
+                        }
 
-                            if let Ok(new_speed) = nvctl::domain::FanSpeed::new(clamped_speed) {
-                                point.temperature = clamped_temp;
-                                point.speed = new_speed;
-
-                                // Create new curve with updated points
-                                if let Ok(new_curve) = nvctl::domain::FanCurve::new(
-                                    points,
-                                    current_curve.default_speed(),
-                                ) {
-                                    // Ensure the editing_curves vec is large enough
-                                    if fan_idx < self.state.editing_curves.len() {
-                                        self.state.editing_curves[fan_idx] = Some(new_curve);
-                                    }
-                                }
+                        match move_curve_point(&current_curve, index, temp, speed) {
+                            Ok(new_curve) => {
+                                self.state.editing_curves[fan_idx] = Some(new_curve);
+                            }
+                            Err(error) => {
+                                self.state.set_notification(Notification::error(error));
                             }
                         }
                     }
                     FanControlMessage::CurvePointAdded(temp, speed) => {
-                        use nvctl::domain::{FanCurvePoint, FanSpeed};
-
                         let fan_idx = self.state.selected_curve_fan;
-
-                        // Get the current curve
                         let current_curve = self
                             .state
                             .editing_curves
@@ -334,28 +1068,23 @@ impl NvctlGui {
                             })
                             .unwrap_or_default();
 
-                        // Clone points and add new point
-                        let mut points: Vec<_> = current_curve.points().to_vec();
+                        if fan_idx >= self.state.editing_curves.len() {
+                            self.state.set_notification(Notification::error(format!(
+                                "Fan {} is not available",
+                                fan_idx + 1
+                            )));
+                            return Task::none();
+                        }
 
-                        // Clamp values
-                        let clamped_temp = temp.clamp(20, 100);
-                        let clamped_speed = speed.clamp(0, 100);
-
-                        if let Ok(new_speed) = FanSpeed::new(clamped_speed) {
-                            let new_point = FanCurvePoint::new(clamped_temp, new_speed);
-                            points.push(new_point);
-
-                            // Create new curve (will sort by temperature)
-                            if let Ok(new_curve) =
-                                nvctl::domain::FanCurve::new(points, current_curve.default_speed())
-                            {
-                                if fan_idx < self.state.editing_curves.len() {
-                                    self.state.editing_curves[fan_idx] = Some(new_curve);
-                                }
+                        match add_curve_point(&current_curve, temp, speed) {
+                            Ok((new_curve, actual_temp, actual_speed)) => {
+                                self.state.editing_curves[fan_idx] = Some(new_curve);
                                 self.state.set_notification(Notification::success(format!(
-                                    "Added point at {}°C, {}%",
-                                    clamped_temp, clamped_speed
+                                    "Added point at {actual_temp}°C, {actual_speed}%"
                                 )));
+                            }
+                            Err(error) => {
+                                self.state.set_notification(Notification::error(error));
                             }
                         }
                     }
@@ -378,19 +1107,35 @@ impl NvctlGui {
                         // Clone points and remove the specified point
                         let mut points: Vec<_> = current_curve.points().to_vec();
 
-                        // Don't remove if only one point left
-                        if points.len() > 1 && index < points.len() {
+                        if fan_idx >= self.state.editing_curves.len() {
+                            self.state.set_notification(Notification::error(format!(
+                                "Fan {} is not available",
+                                fan_idx + 1
+                            )));
+                            return Task::none();
+                        }
+
+                        if points.len() <= 1 {
+                            self.state.set_notification(Notification::error(
+                                "A fan curve must contain at least one point",
+                            ));
+                        } else if index >= points.len() {
+                            self.state.set_notification(Notification::error(
+                                "Curve point is no longer available",
+                            ));
+                        } else {
                             points.remove(index);
 
-                            // Create new curve
-                            if let Ok(new_curve) =
-                                nvctl::domain::FanCurve::new(points, current_curve.default_speed())
-                            {
-                                if fan_idx < self.state.editing_curves.len() {
+                            match FanCurve::new(points, current_curve.default_speed()) {
+                                Ok(new_curve) => {
                                     self.state.editing_curves[fan_idx] = Some(new_curve);
+                                    self.state
+                                        .set_notification(Notification::success("Point removed"));
                                 }
-                                self.state
-                                    .set_notification(Notification::success("Point removed"));
+                                Err(error) => {
+                                    self.state
+                                        .set_notification(Notification::error(error.to_string()));
+                                }
                             }
                         }
                     }
@@ -399,22 +1144,33 @@ impl NvctlGui {
                         let fan_idx = self.state.selected_curve_fan;
                         if fan_idx < self.state.editing_curves.len() {
                             self.state.editing_curves[fan_idx] = Some(preset.to_curve());
+                            self.state.set_notification(Notification::success(format!(
+                                "Applied {} preset to Fan {}",
+                                preset.name(),
+                                fan_idx + 1
+                            )));
+                        } else {
+                            self.state.set_notification(Notification::error(format!(
+                                "Fan {} is not available",
+                                fan_idx + 1
+                            )));
                         }
-                        self.state.set_notification(Notification::success(format!(
-                            "Applied {} preset to Fan {}",
-                            preset.name(),
-                            fan_idx + 1
-                        )));
                     }
                     FanControlMessage::CurveControlToggled(enabled) => {
                         // Toggle curve control for selected fan
                         let fan_idx = self.state.selected_curve_fan;
                         if fan_idx < self.state.curve_control_enabled.len() {
                             self.state.curve_control_enabled[fan_idx] = enabled;
+                        } else {
+                            self.state.set_notification(Notification::error(format!(
+                                "Fan {} is not available",
+                                fan_idx + 1
+                            )));
+                            return Task::none();
                         }
                         let status = if enabled { "enabled" } else { "disabled" };
                         self.state.set_notification(Notification::success(format!(
-                            "Curve control {} for Fan {}",
+                            "Curve control will be {} for Fan {} when applied",
                             status,
                             fan_idx + 1
                         )));
@@ -444,48 +1200,43 @@ impl NvctlGui {
 
                         // Get GPU indices to apply to
                         let gpu_indices = self.state.target_gpu_indices();
-
-                        // Update daemon state
-                        if let Ok(daemon) = self.curve_daemon.read() {
-                            let daemon_state = daemon.state();
-                            if let Ok(mut state) = daemon_state.write() {
-                                for gpu_index in &gpu_indices {
-                                    state.set_curve(
-                                        *gpu_index,
-                                        fan_idx as u32,
-                                        curve.clone(),
-                                        enabled,
-                                    );
-                                }
-                            }
-                            drop(daemon_state);
+                        let target_gpus: Vec<_> = self
+                            .state
+                            .gpus
+                            .iter()
+                            .filter(|gpu| gpu_indices.contains(&gpu.index))
+                            .map(|gpu| (gpu.index, gpu.info.uuid.clone(), gpu.fan_speeds.len()))
+                            .collect();
+                        if target_gpus.is_empty() {
+                            self.state
+                                .set_notification(Notification::error("No GPU selected"));
+                            return Task::none();
+                        }
+                        if let Some((_, uuid, fan_count)) = target_gpus
+                            .iter()
+                            .find(|(_, _, fan_count)| fan_idx >= *fan_count)
+                        {
+                            self.state.set_notification(Notification::error(format!(
+                                "Fan {} is out of range for GPU {} ({} fans)",
+                                fan_idx + 1,
+                                uuid,
+                                fan_count
+                            )));
+                            return Task::none();
                         }
 
-                        // Start or stop daemon based on enabled curves
-                        if let Ok(mut daemon) = self.curve_daemon.write() {
-                            let daemon_state = daemon.state();
-                            let has_enabled = daemon_state
-                                .read()
-                                .map(|s| s.has_enabled_curves())
-                                .unwrap_or(false);
-                            drop(daemon_state);
-
-                            if has_enabled && !daemon.is_running() {
-                                daemon.start();
-                                log::info!("Fan curve daemon started");
-                            } else if !has_enabled && daemon.is_running() {
-                                daemon.stop();
-                                log::info!("Fan curve daemon stopped");
-
-                                // Restore fans to auto mode
-                                for gpu_index in &gpu_indices {
-                                    let _ = self.monitor.set_fan_policy(
-                                        *gpu_index,
-                                        fan_idx as u32,
-                                        FanPolicy::Auto,
-                                    );
-                                }
-                            }
+                        let updates: Vec<CurveUpdate> = target_gpus
+                            .into_iter()
+                            .map(|(gpu_index, uuid, fan_count)| {
+                                (gpu_index, uuid, fan_count, fan_idx, curve.clone(), enabled)
+                            })
+                            .collect();
+                        if let Err(error) = self.apply_curve_updates(&updates) {
+                            self.state.set_notification(Notification::error(format!(
+                                "Failed to apply fan curve: {}",
+                                error
+                            )));
+                            return Task::none();
                         }
 
                         let status = if enabled { "enabled" } else { "disabled" };
@@ -505,10 +1256,7 @@ impl NvctlGui {
 
                 match msg {
                     PowerControlMessage::LimitChanged(limit) => {
-                        // Update power limit in state
-                        if let Some(gpu) = self.state.current_gpu_mut() {
-                            gpu.power_limit = limit;
-                        }
+                        self.state.pending_power_limit = Some(limit);
                     }
                     PowerControlMessage::ResetToDefault => {
                         // Reset to default power limit
@@ -519,39 +1267,95 @@ impl NvctlGui {
                             .map(|c| c.default);
 
                         if let Some(default) = default_watts {
-                            if let Some(gpu) = self.state.current_gpu_mut() {
-                                gpu.power_limit = default;
-                            }
+                            self.state.pending_power_limit = Some(default);
                             self.state.set_notification(Notification::success(format!(
-                                "Power limit reset to default ({}W)",
+                                "Default power limit selected ({}W); apply to update the GPU",
                                 default.as_watts()
                             )));
+                        } else {
+                            self.state.set_notification(Notification::error(
+                                "The selected GPU does not expose a default power limit",
+                            ));
                         }
                     }
                     PowerControlMessage::ApplyLimit => {
                         // Get current power limit from state
-                        let limit = match self.state.current_gpu() {
-                            Some(gpu) => gpu.power_limit,
-                            None => return Task::none(),
+                        let limit = match (self.state.pending_power_limit, self.state.current_gpu())
+                        {
+                            (Some(limit), _) => limit,
+                            (None, Some(gpu)) => gpu.power_limit,
+                            (None, None) => return Task::none(),
                         };
 
                         // Get GPU indices to apply to
                         let gpu_indices = self.state.target_gpu_indices();
+                        let mut old_limits = Vec::new();
+                        for gpu in self
+                            .state
+                            .gpus
+                            .iter()
+                            .filter(|gpu| gpu_indices.contains(&gpu.index))
+                        {
+                            let Some(constraints) = gpu.power_constraints else {
+                                self.state.set_notification(Notification::error(format!(
+                                    "GPU {} does not expose power constraints",
+                                    gpu.info.uuid
+                                )));
+                                return Task::none();
+                            };
+                            if !constraints.contains(&limit) {
+                                self.state.set_notification(Notification::error(format!(
+                                    "Power limit {} is outside GPU {} range {}",
+                                    limit, gpu.info.uuid, constraints
+                                )));
+                                return Task::none();
+                            }
+                            old_limits.push((gpu.info.uuid.clone(), gpu.power_limit));
+                        }
+                        if old_limits.is_empty() {
+                            self.state
+                                .set_notification(Notification::error("No GPU selected"));
+                            return Task::none();
+                        }
 
-                        for gpu_index in gpu_indices {
-                            match self.monitor.set_power_limit(gpu_index, limit) {
+                        let mut applied: Vec<(String, nvctl::domain::PowerLimit)> = Vec::new();
+                        for (gpu_uuid, old_limit) in &old_limits {
+                            match self.monitor.set_power_limit_by_uuid(gpu_uuid, limit) {
                                 Ok(()) => {
                                     log::info!(
                                         "Power limit set to {}W for GPU {}",
                                         limit.as_watts(),
-                                        gpu_index
+                                        gpu_uuid
                                     );
+                                    applied.push((gpu_uuid.clone(), *old_limit));
                                 }
                                 Err(e) => {
+                                    for (rollback_uuid, rollback_limit) in applied.into_iter().rev()
+                                    {
+                                        if let Err(rollback_error) = self
+                                            .monitor
+                                            .set_power_limit_by_uuid(&rollback_uuid, rollback_limit)
+                                        {
+                                            log::error!(
+                                                "Failed to roll back GPU {} power limit: {}",
+                                                rollback_uuid,
+                                                rollback_error
+                                            );
+                                        }
+                                    }
                                     self.state.set_notification(Notification::error(e));
                                     return Task::none();
                                 }
                             }
+                        }
+
+                        for gpu in &mut self.state.gpus {
+                            if gpu_indices.contains(&gpu.index) {
+                                gpu.power_limit = limit;
+                            }
+                        }
+                        for gpu_index in gpu_indices {
+                            self.state.set_gpu_pending_power(gpu_index, None);
                         }
 
                         self.state.set_notification(Notification::success(format!(
@@ -568,42 +1372,23 @@ impl NvctlGui {
                 use crate::message::ProfileMessage;
 
                 match msg {
-                    ProfileMessage::Selected(name) => {
-                        // Set as active profile
-                        self.profile_service.set_active(Some(name.clone()));
-                        self.state.active_profile = Some(name.clone());
-
-                        // Apply profile settings
-                        if let Some(profile) = self.profile_service.get(&name) {
-                            // Apply settings to current GPU if available
-                            if let Some(settings) = profile.gpu_settings.get("default") {
-                                if settings.apply_fan_curve {
-                                    if let Some(ref curve) = settings.fan_curve {
-                                        // Apply curve to all fans
-                                        for i in 0..self.state.editing_curves.len() {
-                                            self.state.editing_curves[i] = Some(curve.clone());
-                                            if i < self.state.curve_control_enabled.len() {
-                                                self.state.curve_control_enabled[i] = true;
-                                            }
-                                        }
-                                    }
-                                }
-                                if settings.apply_power_limit {
-                                    if let (Some(limit), Some(gpu)) =
-                                        (settings.power_limit, self.state.current_gpu_mut())
-                                    {
-                                        gpu.power_limit = limit;
-                                    }
-                                }
-                            }
-                        }
-
-                        self.state.set_notification(Notification::success(format!(
+                    ProfileMessage::Selected(name) => match self.apply_profile(&name) {
+                        Ok(()) => self.state.set_notification(Notification::success(format!(
                             "Profile '{}' applied",
                             name
-                        )));
-                    }
+                        ))),
+                        Err(error) => self.state.set_notification(Notification::error(format!(
+                            "Failed to apply profile '{}': {}",
+                            name, error
+                        ))),
+                    },
                     ProfileMessage::SaveCurrent(name) => {
+                        if self.state.current_gpu().is_none() {
+                            self.state.set_notification(Notification::error(
+                                "No GPU is available to save into a profile",
+                            ));
+                            return Task::none();
+                        }
                         // Create profile from current settings
                         let mut profile = Profile::new(&name);
 
@@ -611,12 +1396,44 @@ impl NvctlGui {
                         if let Some(gpu) = self.state.current_gpu() {
                             let mut settings = GpuSettings::new();
 
-                            // Use the first fan's curve for the profile
-                            if let Some(Some(ref curve)) = self.state.editing_curves.first() {
-                                settings = settings.with_fan_curve(curve.clone());
+                            let curves: Vec<_> = (0..gpu.fan_speeds.len())
+                                .map(|fan_index| {
+                                    self.state
+                                        .editing_curves
+                                        .get(fan_index)
+                                        .and_then(|curve| curve.clone())
+                                        .or_else(|| gpu.fan_curves.get(fan_index).cloned())
+                                        .unwrap_or_default()
+                                })
+                                .collect();
+                            if !curves.is_empty() {
+                                let enabled = (0..curves.len())
+                                    .map(|fan_index| self.state.is_curve_enabled(fan_index))
+                                    .collect();
+                                settings = settings.with_fan_curves(curves, enabled);
                             }
 
-                            settings = settings.with_power_limit(gpu.power_limit);
+                            settings = settings.with_power_limit(
+                                self.state.pending_power_limit.unwrap_or(gpu.power_limit),
+                            );
+
+                            match self.monitor.acoustic_limits_by_uuid(&gpu.info.uuid) {
+                                Ok(Some(limits))
+                                    if limits.min.is_some() && limits.max.is_some() =>
+                                {
+                                    if let Some(current) = limits.current {
+                                        settings = settings.with_acoustic_limit(current);
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    self.state.set_notification(Notification::error(format!(
+                                        "Failed to read acoustic settings for profile: {}",
+                                        error
+                                    )));
+                                    return Task::none();
+                                }
+                            }
 
                             profile = profile.with_gpu_settings("default", settings);
                         }
@@ -741,32 +1558,39 @@ impl NvctlGui {
                             }
                         }
                     }
-                    ProfileMessage::Refresh => {
-                        if let Err(e) = self.profile_service.load_all() {
-                            log::warn!("Failed to refresh profiles: {}", e);
+                    ProfileMessage::Refresh => match self.profile_service.load_all() {
+                        Ok(()) => {
+                            self.state.profiles =
+                                self.profile_service.list().into_iter().cloned().collect();
+                            if self
+                                .state
+                                .active_profile
+                                .as_ref()
+                                .is_some_and(|name| !self.profile_service.exists(name))
+                            {
+                                self.state.active_profile = None;
+                            }
                         }
-                        self.state.profiles =
-                            self.profile_service.list().into_iter().cloned().collect();
-                    }
+                        Err(e) => {
+                            self.state.set_notification(Notification::error(format!(
+                                "Failed to refresh profiles: {}",
+                                e
+                            )));
+                        }
+                    },
                 }
                 Task::none()
             }
 
             // Actions
             Message::ApplySettings => {
-                // Apply all current settings to GPU
-                let mut errors = Vec::new();
                 let gpu_indices = self.state.target_gpu_indices();
-
-                // Apply power limit
-                if let Some(gpu) = self.state.current_gpu() {
-                    let limit = gpu.power_limit;
-                    for gpu_index in &gpu_indices {
-                        if let Err(e) = self.monitor.set_power_limit(*gpu_index, limit) {
-                            errors.push(format!("Power limit: {}", e));
-                        }
-                    }
-                }
+                let Some(_) = self.state.current_gpu() else {
+                    self.state
+                        .set_notification(Notification::error("No GPU selected"));
+                    return Task::none();
+                };
+                let pending_limit = self.state.pending_power_limit;
 
                 // Apply all fan curves - collect data first to avoid borrow issues
                 let curve_data: Vec<_> = self
@@ -786,108 +1610,281 @@ impl NvctlGui {
                     })
                     .collect();
 
-                // Update daemon state for all fans
-                if let Ok(daemon) = self.curve_daemon.read() {
-                    let daemon_state = daemon.state();
-                    if let Ok(mut state) = daemon_state.write() {
-                        for (fan_idx, curve, enabled) in &curve_data {
-                            for gpu_index in &gpu_indices {
-                                state.set_curve(
-                                    *gpu_index,
-                                    *fan_idx as u32,
-                                    curve.clone(),
-                                    *enabled,
+                let target_gpus: Vec<_> = self
+                    .state
+                    .gpus
+                    .iter()
+                    .filter(|gpu| gpu_indices.contains(&gpu.index))
+                    .map(|gpu| (gpu.index, gpu.info.uuid.clone(), gpu.fan_speeds.len()))
+                    .collect();
+                if target_gpus.is_empty() {
+                    self.state
+                        .set_notification(Notification::error("No GPU selected"));
+                    return Task::none();
+                }
+
+                let mut old_limits = Vec::new();
+                if let Some(limit) = pending_limit {
+                    for gpu in self
+                        .state
+                        .gpus
+                        .iter()
+                        .filter(|gpu| gpu_indices.contains(&gpu.index))
+                    {
+                        let Some(constraints) = gpu.power_constraints else {
+                            self.state.set_notification(Notification::error(format!(
+                                "GPU {} does not expose power constraints",
+                                gpu.info.uuid
+                            )));
+                            return Task::none();
+                        };
+                        if !constraints.contains(&limit) {
+                            self.state.set_notification(Notification::error(format!(
+                                "Power limit {} is outside GPU {} range {}",
+                                limit, gpu.info.uuid, constraints
+                            )));
+                            return Task::none();
+                        }
+                        old_limits.push((gpu.info.uuid.clone(), gpu.power_limit));
+                    }
+                }
+
+                let mut curve_updates = Vec::new();
+                for (gpu_index, gpu_uuid, fan_count) in &target_gpus {
+                    for (fan_idx, curve, enabled) in &curve_data {
+                        if *fan_idx >= *fan_count {
+                            self.state.set_notification(Notification::error(format!(
+                                "Fan {} is out of range for GPU {} ({} fans)",
+                                fan_idx + 1,
+                                gpu_uuid,
+                                fan_count
+                            )));
+                            return Task::none();
+                        }
+                        curve_updates.push((
+                            *gpu_index,
+                            gpu_uuid.clone(),
+                            *fan_count,
+                            *fan_idx,
+                            curve.clone(),
+                            *enabled,
+                        ));
+                    }
+                }
+
+                let mut applied_power: Vec<(String, nvctl::domain::PowerLimit)> = Vec::new();
+                for (gpu_uuid, old_limit) in &old_limits {
+                    let Some(limit) = pending_limit else {
+                        break;
+                    };
+                    if let Err(error) = self.monitor.set_power_limit_by_uuid(gpu_uuid, limit) {
+                        for (rollback_uuid, rollback_limit) in applied_power.into_iter().rev() {
+                            if let Err(rollback_error) = self
+                                .monitor
+                                .set_power_limit_by_uuid(&rollback_uuid, rollback_limit)
+                            {
+                                log::error!(
+                                    "Failed to roll back GPU {} power limit: {}",
+                                    rollback_uuid,
+                                    rollback_error
                                 );
                             }
                         }
-                    };
+                        self.state.set_notification(Notification::error(format!(
+                            "Failed to apply power limit: {}",
+                            error
+                        )));
+                        return Task::none();
+                    }
+                    applied_power.push((gpu_uuid.clone(), *old_limit));
                 }
 
-                // Start daemon if any curves are enabled
-                if let Ok(mut daemon) = self.curve_daemon.write() {
-                    let daemon_state = daemon.state();
-                    let has_enabled = daemon_state
-                        .read()
-                        .map(|s| s.has_enabled_curves())
-                        .unwrap_or(false);
-                    drop(daemon_state);
+                if let Err(error) = self.apply_curve_updates(&curve_updates) {
+                    for (rollback_uuid, rollback_limit) in applied_power.into_iter().rev() {
+                        if let Err(rollback_error) = self
+                            .monitor
+                            .set_power_limit_by_uuid(&rollback_uuid, rollback_limit)
+                        {
+                            log::error!(
+                                "Failed to roll back GPU {} power limit: {}",
+                                rollback_uuid,
+                                rollback_error
+                            );
+                        }
+                    }
+                    self.state.set_notification(Notification::error(format!(
+                        "Failed to apply fan curves: {}",
+                        error
+                    )));
+                    return Task::none();
+                }
 
-                    if has_enabled && !daemon.is_running() {
-                        daemon.start();
-                        log::info!("Fan curve daemon started");
+                if let Some(limit) = pending_limit {
+                    for gpu in &mut self.state.gpus {
+                        if gpu_indices.contains(&gpu.index) {
+                            gpu.power_limit = limit;
+                        }
+                    }
+                    for &gpu_index in &gpu_indices {
+                        self.state.set_gpu_pending_power(gpu_index, None);
+                    }
+                }
+                self.state
+                    .set_notification(Notification::success("All settings applied"));
+                Task::none()
+            }
+
+            Message::ResetSettings => {
+                let gpu_indices = self.state.target_gpu_indices();
+                let targets: Vec<_> = self
+                    .state
+                    .gpus
+                    .iter()
+                    .filter(|gpu| gpu_indices.contains(&gpu.index))
+                    .map(|gpu| {
+                        (
+                            gpu.index,
+                            gpu.info.uuid.clone(),
+                            gpu.fan_speeds.len(),
+                            gpu.power_limit,
+                            gpu.power_constraints.map(|constraints| constraints.default),
+                        )
+                    })
+                    .collect();
+                if targets.is_empty() {
+                    self.state
+                        .set_notification(Notification::error("No GPU selected"));
+                    return Task::none();
+                }
+                let mut errors = Vec::new();
+
+                let power_defaults_available = targets.iter().all(|target| target.4.is_some());
+                if !power_defaults_available {
+                    for (gpu_index, _, _, _, default_limit) in &targets {
+                        if default_limit.is_none() {
+                            errors.push(format!("GPU {} has no power constraints", gpu_index));
+                        }
+                    }
+                }
+
+                let mut applied_power: Vec<(String, nvctl::domain::PowerLimit)> = Vec::new();
+                let mut power_reset = power_defaults_available;
+                if power_defaults_available {
+                    for (gpu_index, gpu_uuid, _, old_limit, default_limit) in &targets {
+                        let Some(default_limit) = *default_limit else {
+                            power_reset = false;
+                            break;
+                        };
+                        if let Err(error) = self
+                            .monitor
+                            .set_power_limit_by_uuid(gpu_uuid, default_limit)
+                        {
+                            errors.push(format!("GPU {} power reset: {}", gpu_index, error));
+                            power_reset = false;
+                            for (rollback_uuid, rollback_limit) in applied_power.drain(..).rev() {
+                                if let Err(rollback_error) = self
+                                    .monitor
+                                    .set_power_limit_by_uuid(&rollback_uuid, rollback_limit)
+                                {
+                                    errors.push(format!(
+                                        "GPU {} power rollback: {}",
+                                        rollback_uuid, rollback_error
+                                    ));
+                                }
+                            }
+                            break;
+                        }
+                        applied_power.push((gpu_uuid.clone(), *old_limit));
+                    }
+                }
+
+                let default_curve = nvctl::domain::FanCurve::default();
+                let mut curve_updates = Vec::new();
+                for (gpu_index, gpu_uuid, fan_count, _, _) in &targets {
+                    for fan_idx in 0..*fan_count {
+                        curve_updates.push((
+                            *gpu_index,
+                            gpu_uuid.clone(),
+                            *fan_count,
+                            fan_idx,
+                            default_curve.clone(),
+                            false,
+                        ));
+                    }
+                }
+                if let Err(error) = self.apply_curve_updates(&curve_updates) {
+                    if power_reset {
+                        for (rollback_uuid, rollback_limit) in applied_power.into_iter().rev() {
+                            if let Err(rollback_error) = self
+                                .monitor
+                                .set_power_limit_by_uuid(&rollback_uuid, rollback_limit)
+                            {
+                                log::error!(
+                                    "Failed to roll back GPU {} power limit: {}",
+                                    rollback_uuid,
+                                    rollback_error
+                                );
+                            }
+                        }
+                    }
+                    self.state.set_notification(Notification::error(format!(
+                        "Failed to reset fan curves: {}",
+                        error
+                    )));
+                    return Task::none();
+                }
+
+                if power_reset {
+                    for (gpu_index, _, _, _, default_limit) in &targets {
+                        if let Some(gpu) = self
+                            .state
+                            .gpus
+                            .iter_mut()
+                            .find(|gpu| gpu.index == *gpu_index)
+                        {
+                            if let Some(default_limit) = default_limit {
+                                gpu.power_limit = *default_limit;
+                            }
+                        }
+                        self.state.set_gpu_pending_power(*gpu_index, None);
+                    }
+                }
+
+                // Restore selected fans to automatic control immediately. If
+                // a write fails, the disabled daemon entry remains safe and
+                // later polling can retry without re-enabling the curve.
+                for (gpu_index, gpu_uuid, fan_count, _, _) in &targets {
+                    for fan_idx in 0..*fan_count {
+                        if let Err(error) = self.monitor.set_fan_policy_by_uuid(
+                            gpu_uuid,
+                            fan_idx as u32,
+                            FanPolicy::Auto,
+                        ) {
+                            errors.push(format!(
+                                "GPU {} Fan {} policy reset: {}",
+                                gpu_index, fan_idx, error
+                            ));
+                        } else if let Some(policy) = self
+                            .state
+                            .gpus
+                            .iter_mut()
+                            .find(|gpu| gpu.info.uuid == *gpu_uuid)
+                            .and_then(|gpu| gpu.fan_policies.get_mut(fan_idx))
+                        {
+                            *policy = Some(FanPolicy::Auto);
+                        }
                     }
                 }
 
                 if errors.is_empty() {
                     self.state
-                        .set_notification(Notification::success("All settings applied"));
+                        .set_notification(Notification::success("Settings reset to defaults"));
                 } else {
                     self.state.set_notification(Notification::warning(format!(
-                        "Some settings failed: {}",
+                        "Some settings could not be reset: {}",
                         errors.join(", ")
                     )));
                 }
-                Task::none()
-            }
-
-            Message::ResetSettings => {
-                // Reset all settings to defaults
-                let gpu_indices = self.state.target_gpu_indices();
-
-                // Reset power limit to default
-                if let Some(gpu) = self.state.current_gpu() {
-                    if let Some(ref constraints) = gpu.power_constraints {
-                        let default_limit = constraints.default;
-                        for gpu_index in &gpu_indices {
-                            let _ = self.monitor.set_power_limit(*gpu_index, default_limit);
-                        }
-                        if let Some(gpu_mut) = self.state.current_gpu_mut() {
-                            gpu_mut.power_limit = default_limit;
-                        }
-                    }
-                }
-
-                // Reset all curves to default and disable curve control
-                for i in 0..self.state.editing_curves.len() {
-                    self.state.editing_curves[i] = Some(nvctl::domain::FanCurve::default());
-                    if i < self.state.curve_control_enabled.len() {
-                        self.state.curve_control_enabled[i] = false;
-                    }
-                }
-
-                // Stop daemon and restore fans to auto
-                let num_fans = self.state.editing_curves.len();
-                if let Ok(mut daemon) = self.curve_daemon.write() {
-                    if daemon.is_running() {
-                        daemon.stop();
-                        log::info!("Fan curve daemon stopped");
-                    }
-
-                    // Clear all curves from daemon state
-                    let daemon_state = daemon.state();
-                    if let Ok(mut state) = daemon_state.write() {
-                        for gpu_index in &gpu_indices {
-                            for fan_idx in 0..num_fans {
-                                state.remove_curve(*gpu_index, fan_idx as u32);
-                            }
-                        }
-                    }
-                    drop(daemon_state);
-                }
-
-                // Restore fans to auto mode
-                for gpu_index in &gpu_indices {
-                    for fan_idx in 0..self.state.editing_curves.len() {
-                        let _ = self.monitor.set_fan_policy(
-                            *gpu_index,
-                            fan_idx as u32,
-                            FanPolicy::Auto,
-                        );
-                    }
-                }
-
-                self.state
-                    .set_notification(Notification::success("Settings reset to defaults"));
                 Task::none()
             }
 
@@ -1060,7 +2057,7 @@ impl NvctlGui {
             View::PowerControl => views::view_power_control(&self.state),
             View::ThermalControl => views::view_thermal_control(&self.state),
             View::Profiles => views::view_profiles(&self.state),
-            View::Settings => views::view_settings(&self.state),
+            View::Settings => views::view_settings(&self.state, &self.config),
         };
 
         container(content)
@@ -1141,8 +2138,12 @@ impl NvctlGui {
     /// Set up subscriptions
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
-            // Poll GPU state every second
-            iced::time::every(Duration::from_secs(1)).map(Message::Tick),
+            // Poll GPU state at the configured interval.
+            iced::time::every(Duration::from_millis(
+                self.config.preferences.poll_interval_ms,
+            ))
+            .map(Message::Tick),
+            iced::window::open_events().map(Message::WindowOpened),
             // Listen for keyboard shortcuts
             keyboard::on_key_press(handle_keyboard_shortcut),
         ])
@@ -1184,8 +2185,69 @@ impl Default for NvctlGui {
             monitor: GpuMonitor::new(),
             profile_service: ProfileService::new(),
             config: GuiConfig::default(),
+            config_writable: true,
             tray: None,
+            window_id: None,
             curve_daemon: Arc::new(RwLock::new(CurveDaemon::new())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{CurvePreset, FanControlMessage, PowerControlMessage};
+
+    #[test]
+    fn moving_curve_point_cannot_cross_neighbours_or_decrease_speed() {
+        let curve = FanCurve::default_curve();
+        let moved = move_curve_point(&curve, 1, 99, 0).unwrap();
+
+        assert_eq!(moved.points()[1].temperature, 74);
+        assert_eq!(moved.points()[1].speed.as_percentage(), 30);
+        assert_eq!(moved.points()[2].temperature, 75);
+    }
+
+    #[test]
+    fn adding_curve_point_rejects_duplicates_and_clamps_speed_to_neighbours() {
+        let curve = FanCurve::default_curve();
+        assert!(add_curve_point(&curve, 60, 50).is_err());
+
+        let (curve, temperature, speed) = add_curve_point(&curve, 70, 0).unwrap();
+        assert_eq!(temperature, 70);
+        assert_eq!(speed, 50);
+        assert_eq!(curve.speed_for_temperature(70).as_percentage(), 50);
+    }
+
+    #[test]
+    fn moving_missing_curve_point_returns_an_error() {
+        assert!(move_curve_point(&FanCurve::default_curve(), usize::MAX, 50, 50).is_err());
+    }
+
+    #[test]
+    fn stale_curve_messages_do_not_report_false_success() {
+        let mut app = NvctlGui::default();
+
+        let _ = app.update(Message::FanControl(FanControlMessage::SelectCurveFan(3)));
+        assert!(app.state.notification.as_ref().is_some_and(|notification| {
+            notification.level == crate::state::NotificationLevel::Error
+        }));
+
+        let _ = app.update(Message::FanControl(FanControlMessage::PresetSelected(
+            CurvePreset::Balanced,
+        )));
+        assert!(app.state.notification.as_ref().is_some_and(|notification| {
+            notification.level == crate::state::NotificationLevel::Error
+        }));
+    }
+
+    #[test]
+    fn resetting_an_unavailable_power_limit_reports_an_error() {
+        let mut app = NvctlGui::default();
+        let _ = app.update(Message::PowerControl(PowerControlMessage::ResetToDefault));
+
+        assert!(app.state.notification.as_ref().is_some_and(|notification| {
+            notification.level == crate::state::NotificationLevel::Error
+        }));
     }
 }

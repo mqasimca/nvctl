@@ -46,7 +46,7 @@ impl From<i32> for Temperature {
 
 impl From<u32> for Temperature {
     fn from(value: u32) -> Self {
-        Self::new(value as i32)
+        Self::new(i32::try_from(value).unwrap_or(i32::MAX))
     }
 }
 
@@ -202,6 +202,8 @@ mod tests {
     fn test_temperature_from_u32() {
         let temp: Temperature = 65u32.into();
         assert_eq!(temp.as_celsius(), 65);
+        let saturated: Temperature = u32::MAX.into();
+        assert_eq!(saturated.as_celsius(), i32::MAX);
     }
 
     #[test]

@@ -9,7 +9,7 @@ mod profiles;
 mod tray;
 
 #[allow(unused_imports)]
-pub use config::{GpuFanConfig, GuiConfig, Preferences};
+pub use config::{CurveControlConfig, GpuFanConfig, GuiConfig, Preferences};
 pub use curve_daemon::CurveDaemon;
 pub use gpu_monitor::GpuMonitor;
 pub use profiles::{GpuSettings, Profile, ProfileService};

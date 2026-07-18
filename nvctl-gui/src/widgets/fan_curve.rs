@@ -71,18 +71,31 @@ impl FanCurveEditor {
     /// Bottom padding for X-axis labels
     const PADDING_BOTTOM: f32 = 35.0;
 
+    fn graph_width(bounds: &Rectangle) -> f32 {
+        (bounds.width - Self::PADDING_LEFT - Self::PADDING_RIGHT).max(0.0)
+    }
+
+    fn graph_height(bounds: &Rectangle) -> f32 {
+        (bounds.height - Self::PADDING_TOP - Self::PADDING_BOTTOM).max(0.0)
+    }
+
+    fn has_graph_area(bounds: &Rectangle) -> bool {
+        Self::graph_width(bounds) > f32::EPSILON && Self::graph_height(bounds) > f32::EPSILON
+    }
+
     /// Convert temperature to X coordinate
     fn temp_to_x(temp: i32, bounds: &Rectangle) -> f32 {
         let (min_temp, max_temp) = Self::temp_range();
-        let width = bounds.width - Self::PADDING_LEFT - Self::PADDING_RIGHT;
-        let ratio = (temp - min_temp) as f32 / (max_temp - min_temp) as f32;
+        let width = Self::graph_width(bounds);
+        let ratio =
+            (temp.clamp(min_temp, max_temp) - min_temp) as f32 / (max_temp - min_temp) as f32;
         Self::PADDING_LEFT + width * ratio
     }
 
     /// Convert speed to Y coordinate
     fn speed_to_y(speed: u8, bounds: &Rectangle) -> f32 {
         let (min_speed, max_speed) = Self::speed_range();
-        let height = bounds.height - Self::PADDING_TOP - Self::PADDING_BOTTOM;
+        let height = Self::graph_height(bounds);
         let ratio = (speed - min_speed) as f32 / (max_speed - min_speed) as f32;
         // Y is inverted (0 at top)
         bounds.height - Self::PADDING_BOTTOM - height * ratio
@@ -91,7 +104,10 @@ impl FanCurveEditor {
     /// Convert X coordinate to temperature
     fn x_to_temp(x: f32, bounds: &Rectangle) -> i32 {
         let (min_temp, max_temp) = Self::temp_range();
-        let width = bounds.width - Self::PADDING_LEFT - Self::PADDING_RIGHT;
+        let width = Self::graph_width(bounds);
+        if width <= f32::EPSILON {
+            return min_temp;
+        }
         let ratio = ((x - Self::PADDING_LEFT) / width).clamp(0.0, 1.0);
         min_temp + ((max_temp - min_temp) as f32 * ratio) as i32
     }
@@ -99,7 +115,10 @@ impl FanCurveEditor {
     /// Convert Y coordinate to speed
     fn y_to_speed(y: f32, bounds: &Rectangle) -> u8 {
         let (min_speed, max_speed) = Self::speed_range();
-        let height = bounds.height - Self::PADDING_TOP - Self::PADDING_BOTTOM;
+        let height = Self::graph_height(bounds);
+        if height <= f32::EPSILON {
+            return min_speed;
+        }
         // Y is inverted
         let ratio = ((bounds.height - Self::PADDING_BOTTOM - y) / height).clamp(0.0, 1.0);
         min_speed + ((max_speed - min_speed) as f32 * ratio) as u8
@@ -107,6 +126,10 @@ impl FanCurveEditor {
 
     /// Find which point (if any) is at the given position
     fn point_at_position(&self, position: Point, bounds: &Rectangle) -> Option<usize> {
+        if !Self::has_graph_area(bounds) {
+            return None;
+        }
+
         let points = self.curve.points();
         for (i, point) in points.iter().enumerate() {
             let px = Self::temp_to_x(point.temperature, bounds);
@@ -123,7 +146,8 @@ impl FanCurveEditor {
 
     /// Check if position is within the graph area
     fn is_in_graph_area(position: Point, bounds: &Rectangle) -> bool {
-        position.x >= Self::PADDING_LEFT
+        Self::has_graph_area(bounds)
+            && position.x >= Self::PADDING_LEFT
             && position.x <= bounds.width - Self::PADDING_RIGHT
             && position.y >= Self::PADDING_TOP
             && position.y <= bounds.height - Self::PADDING_BOTTOM
@@ -156,6 +180,12 @@ impl canvas::Program<Message> for FanCurveEditor {
                 return (event::Status::Ignored, None);
             }
         };
+
+        if !Self::has_graph_area(&bounds) {
+            state.dragging = None;
+            state.hovered = None;
+            return (event::Status::Ignored, None);
+        }
 
         match event {
             Event::Mouse(mouse_event) => match mouse_event {
@@ -270,8 +300,11 @@ impl canvas::Program<Message> for FanCurveEditor {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
 
-        let graph_width = bounds.width - Self::PADDING_LEFT - Self::PADDING_RIGHT;
-        let graph_height = bounds.height - Self::PADDING_TOP - Self::PADDING_BOTTOM;
+        let graph_width = Self::graph_width(&bounds);
+        let graph_height = Self::graph_height(&bounds);
+        if !Self::has_graph_area(&bounds) {
+            return vec![frame.into_geometry()];
+        }
 
         // Draw grid background
         let bg = Path::rectangle(
@@ -546,6 +579,10 @@ impl FanSpeedSlider {
     #[allow(dead_code)]
     pub fn with_min(mut self, min: u8) -> Self {
         self.min = min.min(100);
+        if self.max < self.min {
+            self.max = self.min;
+        }
+        self.speed = self.speed.clamp(self.min, self.max);
         self
     }
 
@@ -553,6 +590,10 @@ impl FanSpeedSlider {
     #[allow(dead_code)]
     pub fn with_max(mut self, max: u8) -> Self {
         self.max = max.min(100);
+        if self.min > self.max {
+            self.min = self.max;
+        }
+        self.speed = self.speed.clamp(self.min, self.max);
         self
     }
 }
@@ -573,7 +614,7 @@ impl canvas::Program<Message> for FanSpeedSlider {
         let padding = 20.0;
         let bar_height = 20.0;
         let bar_y = bounds.height / 2.0 - bar_height / 2.0;
-        let bar_width = bounds.width - padding * 2.0;
+        let bar_width = (bounds.width - padding * 2.0).max(0.0);
 
         // Draw background bar
         let bg = Path::new(|builder| {
@@ -586,7 +627,12 @@ impl canvas::Program<Message> for FanSpeedSlider {
         frame.fill(&bg, colors::BG_ELEVATED);
 
         // Draw filled portion
-        let ratio = (self.speed - self.min) as f32 / (self.max - self.min) as f32;
+        let span = self.max.saturating_sub(self.min);
+        let ratio = if span == 0 {
+            0.0
+        } else {
+            self.speed.saturating_sub(self.min) as f32 / span as f32
+        };
         let fill_width = bar_width * ratio;
         let color = colors::fan_color(self.speed);
 
@@ -734,5 +780,54 @@ mod tests {
         let y = FanCurveEditor::speed_to_y(speed, &bounds);
         let speed_back = FanCurveEditor::y_to_speed(y, &bounds);
         assert_eq!(speed, speed_back);
+    }
+
+    #[test]
+    fn coordinate_conversion_is_safe_for_tiny_bounds() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 30.0,
+            height: 30.0,
+        };
+
+        assert!(!FanCurveEditor::has_graph_area(&bounds));
+        assert_eq!(FanCurveEditor::x_to_temp(10.0, &bounds), 20);
+        assert_eq!(FanCurveEditor::y_to_speed(10.0, &bounds), 0);
+        assert!(FanCurveEditor::new(FanCurve::default())
+            .point_at_position(Point::new(10.0, 10.0), &bounds)
+            .is_none());
+    }
+
+    #[test]
+    fn displayed_temperatures_are_clamped_to_the_graph() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 250.0,
+        };
+
+        assert_eq!(
+            FanCurveEditor::temp_to_x(-100, &bounds),
+            FanCurveEditor::temp_to_x(20, &bounds)
+        );
+        assert_eq!(
+            FanCurveEditor::temp_to_x(200, &bounds),
+            FanCurveEditor::temp_to_x(100, &bounds)
+        );
+    }
+
+    #[test]
+    fn fan_speed_slider_normalizes_reversed_and_zero_ranges() {
+        let slider = FanSpeedSlider::new(50).with_min(80).with_max(20);
+        assert_eq!(slider.min, 20);
+        assert_eq!(slider.max, 20);
+        assert_eq!(slider.speed, 20);
+
+        let slider = FanSpeedSlider::new(50).with_max(20).with_min(80);
+        assert_eq!(slider.min, 80);
+        assert_eq!(slider.max, 80);
+        assert_eq!(slider.speed, 80);
     }
 }

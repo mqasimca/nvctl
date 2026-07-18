@@ -2,7 +2,8 @@
 //!
 //! Merges configuration from files and CLI arguments.
 
-use crate::config::{Config, ConfigFile};
+use crate::config::{Config, ConfigFile, GpuConfig};
+use crate::error::ConfigError;
 
 /// Builder for merging configuration sources
 pub struct ConfigBuilder {
@@ -18,18 +19,18 @@ impl ConfigBuilder {
     }
 
     /// Load configuration from a file
-    pub fn with_file(mut self, path: Option<&str>) -> Self {
+    pub fn with_file(mut self, path: Option<&str>) -> Result<Self, ConfigError> {
         let file_config = if let Some(path) = path {
-            ConfigFile::load(path).ok()
+            Some(ConfigFile::load(path)?)
         } else {
-            ConfigFile::load_default()
+            ConfigFile::load_default()?
         };
 
         if let Some(cfg) = file_config {
             self.config = cfg;
         }
 
-        self
+        Ok(self)
     }
 
     /// Override with CLI verbose flag
@@ -76,6 +77,19 @@ impl ConfigBuilder {
     pub fn with_gpu_uuid(mut self, uuid: Option<String>) -> Self {
         if let Some(u) = uuid {
             self.config.gpu.uuid = Some(u);
+        }
+        self
+    }
+
+    /// Replace file-based GPU selection when any CLI selector is present.
+    pub fn with_gpu_selection(
+        mut self,
+        index: Option<u32>,
+        name: Option<String>,
+        uuid: Option<String>,
+    ) -> Self {
+        if index.is_some() || name.is_some() || uuid.is_some() {
+            self.config.gpu = GpuConfig { index, name, uuid };
         }
         self
     }

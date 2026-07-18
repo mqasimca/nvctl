@@ -10,7 +10,7 @@ use nvctl::domain::{
     ClockSpeed, FanCurve, FanPolicy, FanSpeed, GpuInfo, MemoryInfo, PerformanceState,
     PowerConstraints, PowerLimit, Temperature, ThermalThresholds, Utilization,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Maximum history length for metrics (5 minutes at 1Hz)
@@ -46,6 +46,12 @@ pub struct AppState {
     /// Currently selected fan for curve editing
     pub selected_curve_fan: usize,
 
+    /// Power limit edited in the UI but not yet applied to hardware
+    pub pending_power_limit: Option<PowerLimit>,
+
+    /// Per-GPU editor state, keyed by the stable GPU UUID
+    gpu_editor_states: HashMap<String, GpuEditorState>,
+
     /// Available profiles
     pub profiles: Vec<Profile>,
 
@@ -65,6 +71,14 @@ pub struct AppState {
     pub edit_profile_name: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct GpuEditorState {
+    editing_curves: Vec<Option<FanCurve>>,
+    curve_control_enabled: Vec<bool>,
+    selected_curve_fan: usize,
+    pending_power_limit: Option<PowerLimit>,
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
@@ -77,6 +91,8 @@ impl Default for AppState {
             editing_curves: Vec::new(),
             curve_control_enabled: Vec::new(),
             selected_curve_fan: 0,
+            pending_power_limit: None,
+            gpu_editor_states: HashMap::new(),
             profiles: Vec::new(),
             active_profile: None,
             new_profile_name: String::new(),
@@ -105,8 +121,28 @@ impl AppState {
 
     /// Update GPU state from a snapshot
     pub fn update_gpu(&mut self, snapshot: GpuStateSnapshot) {
-        if let Some(gpu) = self.gpus.iter_mut().find(|g| g.index == snapshot.index) {
+        let fan_count = snapshot.fan_speeds.len();
+        if let Some(position) = self.gpus.iter().position(|gpu| gpu.index == snapshot.index) {
+            let gpu = &mut self.gpus[position];
             gpu.update_from_snapshot(snapshot);
+            if position == self.selected_gpu {
+                self.init_curves_for_gpu(fan_count);
+            }
+        }
+    }
+
+    /// Update a physical GPU by UUID, including a changed NVML index.
+    pub fn update_gpu_by_uuid(&mut self, gpu_uuid: &str, snapshot: GpuStateSnapshot) {
+        let fan_count = snapshot.fan_speeds.len();
+        if let Some(position) = self.gpus.iter().position(|gpu| gpu.info.uuid == gpu_uuid) {
+            let gpu = &mut self.gpus[position];
+            gpu.index = snapshot.index;
+            gpu.info.index = snapshot.index;
+            gpu.info.name.clone_from(&snapshot.name);
+            gpu.update_from_snapshot(snapshot);
+            if position == self.selected_gpu {
+                self.init_curves_for_gpu(fan_count);
+            }
         }
     }
 
@@ -153,15 +189,132 @@ impl AppState {
 
     /// Initialize curves for current GPU's fan count
     pub fn init_curves_for_gpu(&mut self, fan_count: usize) {
-        if self.editing_curves.len() != fan_count {
-            self.editing_curves = vec![None; fan_count];
-        }
-        if self.curve_control_enabled.len() != fan_count {
-            self.curve_control_enabled = vec![false; fan_count];
-        }
-        if self.selected_curve_fan >= fan_count && fan_count > 0 {
+        self.editing_curves.resize(fan_count, None);
+        self.curve_control_enabled.resize(fan_count, false);
+        if self.selected_curve_fan >= fan_count {
             self.selected_curve_fan = 0;
         }
+    }
+
+    /// Save the current editor buffers and switch to another detected GPU.
+    pub fn select_gpu(&mut self, index: usize) {
+        if index >= self.gpus.len() || index == self.selected_gpu {
+            return;
+        }
+
+        self.save_current_gpu_editor();
+        self.selected_gpu = index;
+        self.load_current_gpu_editor();
+    }
+
+    /// Replace the discovered GPU list without losing the selected physical GPU.
+    pub fn replace_gpus_preserving_selection(&mut self, gpus: Vec<GpuState>) {
+        let selected_uuid = self.current_gpu().map(|gpu| gpu.info.uuid.clone());
+        self.save_current_gpu_editor();
+        self.gpus = gpus;
+        self.selected_gpu = selected_uuid
+            .as_deref()
+            .and_then(|uuid| self.gpus.iter().position(|gpu| gpu.info.uuid == uuid))
+            .unwrap_or(0);
+        self.load_current_gpu_editor();
+    }
+
+    /// Reinitialize the visible editor after GPU discovery changes.
+    pub fn refresh_current_gpu_editor(&mut self) {
+        self.load_current_gpu_editor();
+    }
+
+    /// Update one GPU's persisted editor curve, including the visible buffers when selected.
+    pub fn set_gpu_editor_curve(
+        &mut self,
+        gpu_index: u32,
+        fan_count: usize,
+        fan_index: usize,
+        curve: FanCurve,
+        enabled: bool,
+    ) {
+        if fan_index >= fan_count {
+            return;
+        }
+
+        let Some(gpu_uuid) = self
+            .gpus
+            .iter()
+            .find(|gpu| gpu.index == gpu_index)
+            .map(|gpu| gpu.info.uuid.clone())
+        else {
+            return;
+        };
+        let editor = self.gpu_editor_states.entry(gpu_uuid).or_default();
+        editor.editing_curves.resize(fan_count, None);
+        editor.curve_control_enabled.resize(fan_count, false);
+        editor.editing_curves[fan_index] = Some(curve.clone());
+        editor.curve_control_enabled[fan_index] = enabled;
+
+        if self.current_gpu().map(|gpu| gpu.index) == Some(gpu_index) {
+            self.init_curves_for_gpu(fan_count);
+            self.editing_curves[fan_index] = Some(curve);
+            self.curve_control_enabled[fan_index] = enabled;
+        }
+    }
+
+    /// Set or clear a GPU's unapplied power limit editor value.
+    pub fn set_gpu_pending_power(&mut self, gpu_index: u32, limit: Option<PowerLimit>) {
+        let Some(gpu_uuid) = self
+            .gpus
+            .iter()
+            .find(|gpu| gpu.index == gpu_index)
+            .map(|gpu| gpu.info.uuid.clone())
+        else {
+            return;
+        };
+        self.gpu_editor_states
+            .entry(gpu_uuid)
+            .or_default()
+            .pending_power_limit = limit;
+        if self.current_gpu().map(|gpu| gpu.index) == Some(gpu_index) {
+            self.pending_power_limit = limit;
+        }
+    }
+
+    pub fn save_current_gpu_editor(&mut self) {
+        let Some(gpu_uuid) = self.current_gpu().map(|gpu| gpu.info.uuid.clone()) else {
+            return;
+        };
+
+        self.gpu_editor_states.insert(
+            gpu_uuid,
+            GpuEditorState {
+                editing_curves: self.editing_curves.clone(),
+                curve_control_enabled: self.curve_control_enabled.clone(),
+                selected_curve_fan: self.selected_curve_fan,
+                pending_power_limit: self.pending_power_limit,
+            },
+        );
+    }
+
+    fn load_current_gpu_editor(&mut self) {
+        let Some((gpu_uuid, fan_count)) = self
+            .current_gpu()
+            .map(|gpu| (gpu.info.uuid.clone(), gpu.fan_speeds.len()))
+        else {
+            self.editing_curves.clear();
+            self.curve_control_enabled.clear();
+            self.selected_curve_fan = 0;
+            self.pending_power_limit = None;
+            return;
+        };
+
+        let editor = self
+            .gpu_editor_states
+            .get(&gpu_uuid)
+            .cloned()
+            .unwrap_or_default();
+        self.editing_curves = editor.editing_curves;
+        self.curve_control_enabled = editor.curve_control_enabled;
+        self.selected_curve_fan = editor.selected_curve_fan;
+        self.pending_power_limit = editor.pending_power_limit;
+        self.init_curves_for_gpu(fan_count);
     }
 
     /// Get GPU indices to apply settings to (respects linked_gpus mode)
@@ -197,8 +350,12 @@ impl AppState {
             count: self.gpus.len(),
             max_temp: temps.iter().copied().max().unwrap_or(0),
             min_temp: temps.iter().copied().min().unwrap_or(0),
-            avg_temp: temps.iter().sum::<i32>() / temps.len() as i32,
-            total_power: powers.iter().sum(),
+            avg_temp: (temps
+                .iter()
+                .map(|temperature| i64::from(*temperature))
+                .sum::<i64>()
+                / temps.len() as i64) as i32,
+            total_power: powers.iter().copied().fold(0u32, u32::saturating_add),
         }
     }
 }
@@ -239,8 +396,8 @@ pub struct GpuState {
     /// Fan speeds (one per fan)
     pub fan_speeds: Vec<FanSpeed>,
 
-    /// Fan policies (one per fan)
-    pub fan_policies: Vec<FanPolicy>,
+    /// Fan policies (one per fan), when the driver exposes them
+    pub fan_policies: Vec<Option<FanPolicy>>,
 
     /// Fan curves (one per fan controller)
     pub fan_curves: Vec<FanCurve>,
@@ -374,15 +531,15 @@ impl GpuState {
 
     /// Check if any fan is in manual mode
     pub fn has_manual_fans(&self) -> bool {
-        self.fan_policies.contains(&FanPolicy::Manual)
+        self.fan_policies.contains(&Some(FanPolicy::Manual))
     }
 
     /// Get power usage ratio (current / limit)
     pub fn power_ratio(&self) -> f32 {
-        if self.power_limit.as_watts() == 0 {
+        if self.power_limit.as_milliwatts() == 0 {
             return 0.0;
         }
-        self.power_usage.as_watts() as f32 / self.power_limit.as_watts() as f32
+        self.power_usage.as_milliwatts() as f32 / self.power_limit.as_milliwatts() as f32
     }
 }
 
@@ -412,18 +569,17 @@ impl MetricsHistory {
 
     /// Push a new value
     pub fn push(&mut self, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
         if self.data.len() >= MAX_HISTORY_LEN {
             self.data.pop_front();
         }
         self.data.push_back(value);
 
-        // Update min/max
-        if value > self.max {
-            self.max = value;
-        }
-        if value < self.min {
-            self.min = value;
-        }
+        // Recompute the extrema because the previous one may have just expired.
+        self.max = self.data.iter().copied().fold(f32::MIN, f32::max);
+        self.min = self.data.iter().copied().fold(f32::MAX, f32::min);
     }
 
     /// Get all data points
@@ -530,6 +686,31 @@ pub enum NotificationLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nvctl::domain::{FanCurvePoint, FanSpeed};
+
+    fn snapshot(index: u32, fan_count: usize) -> GpuStateSnapshot {
+        GpuStateSnapshot {
+            index,
+            name: format!("GPU {index}"),
+            temperature: Temperature::new(50),
+            fan_speeds: vec![FanSpeed::from_percentage_clamped(50); fan_count],
+            fan_policies: vec![Some(FanPolicy::Auto); fan_count],
+            power_usage: PowerLimit::from_watts(150),
+            power_limit: PowerLimit::from_watts(300),
+            gpu_clock: ClockSpeed::default(),
+            mem_clock: ClockSpeed::default(),
+            utilization: Utilization::default(),
+            memory_info: MemoryInfo::default(),
+            perf_state: PerformanceState::default(),
+            memory_temperature: None,
+            ecc_errors: None,
+            pcie_metrics: None,
+            encoder_util: None,
+            decoder_util: None,
+            health_score: None,
+            timestamp: Instant::now(),
+        }
+    }
 
     #[test]
     fn test_metrics_history() {
@@ -561,6 +742,27 @@ mod tests {
     }
 
     #[test]
+    fn metrics_history_recomputes_expired_extrema_and_ignores_non_finite_values() {
+        let mut old_max = MetricsHistory::new();
+        old_max.push(10_000.0);
+        for i in 0..MAX_HISTORY_LEN {
+            old_max.push(i as f32);
+        }
+        assert_eq!(old_max.max, (MAX_HISTORY_LEN - 1) as f32);
+        assert_eq!(old_max.min, 0.0);
+
+        let mut old_min = MetricsHistory::new();
+        old_min.push(-10_000.0);
+        for i in 0..MAX_HISTORY_LEN {
+            old_min.push(i as f32);
+        }
+        old_min.push(f32::NAN);
+        assert_eq!(old_min.max, (MAX_HISTORY_LEN - 1) as f32);
+        assert_eq!(old_min.min, 0.0);
+        assert_eq!(old_min.len(), MAX_HISTORY_LEN);
+    }
+
+    #[test]
     fn test_notification_auto_dismiss() {
         let notif = Notification::success("Test");
         assert!(!notif.should_dismiss()); // Just created
@@ -575,5 +777,148 @@ mod tests {
         assert_eq!(state.current_view, View::Dashboard);
         assert!(state.gpus.is_empty());
         assert_eq!(state.selected_gpu, 0);
+    }
+
+    #[test]
+    fn gpu_editor_buffers_are_isolated_between_devices() {
+        let mut first = GpuState::new(GpuInfo::new(
+            3,
+            "First GPU".to_string(),
+            "GPU-FIRST".to_string(),
+        ));
+        first.fan_speeds = vec![FanSpeed::new(40).unwrap()];
+        let mut second = GpuState::new(GpuInfo::new(
+            7,
+            "Second GPU".to_string(),
+            "GPU-SECOND".to_string(),
+        ));
+        second.fan_speeds = vec![FanSpeed::new(50).unwrap(), FanSpeed::new(55).unwrap()];
+
+        let first_curve = FanCurve::new(
+            vec![FanCurvePoint::new(50, FanSpeed::new(45).unwrap())],
+            FanSpeed::new(30).unwrap(),
+        )
+        .unwrap();
+        let second_curve = FanCurve::new(
+            vec![FanCurvePoint::new(60, FanSpeed::new(70).unwrap())],
+            FanSpeed::new(35).unwrap(),
+        )
+        .unwrap();
+
+        let mut state = AppState::new();
+        state.gpus = vec![first, second];
+        state.init_curves_for_gpu(1);
+        state.editing_curves[0] = Some(first_curve.clone());
+        state.curve_control_enabled[0] = true;
+        state.pending_power_limit = Some(PowerLimit::from_watts(225));
+
+        state.select_gpu(1);
+        assert_eq!(state.editing_curves, vec![None, None]);
+        assert_eq!(state.curve_control_enabled, vec![false, false]);
+        assert_eq!(state.pending_power_limit, None);
+        state.editing_curves[1] = Some(second_curve.clone());
+        state.pending_power_limit = Some(PowerLimit::from_watts(275));
+
+        state.select_gpu(0);
+        assert_eq!(state.editing_curves, vec![Some(first_curve)]);
+        assert_eq!(state.curve_control_enabled, vec![true]);
+        assert_eq!(state.pending_power_limit, Some(PowerLimit::from_watts(225)));
+
+        state.select_gpu(1);
+        assert_eq!(state.editing_curves[1], Some(second_curve));
+        assert_eq!(state.pending_power_limit, Some(PowerLimit::from_watts(275)));
+    }
+
+    #[test]
+    fn resizing_fan_editors_preserves_still_valid_entries() {
+        let curve = FanCurve::new(
+            vec![FanCurvePoint::new(50, FanSpeed::new(45).unwrap())],
+            FanSpeed::new(30).unwrap(),
+        )
+        .unwrap();
+        let mut state = AppState::new();
+        state.editing_curves = vec![Some(curve.clone()), None];
+        state.curve_control_enabled = vec![true, false];
+        state.selected_curve_fan = 1;
+
+        state.init_curves_for_gpu(1);
+        assert_eq!(state.editing_curves, vec![Some(curve)]);
+        assert_eq!(state.curve_control_enabled, vec![true]);
+        assert_eq!(state.selected_curve_fan, 0);
+
+        state.init_curves_for_gpu(0);
+        assert!(state.editing_curves.is_empty());
+        assert!(state.curve_control_enabled.is_empty());
+        assert_eq!(state.selected_curve_fan, 0);
+    }
+
+    #[test]
+    fn gpu_refresh_preserves_selection_and_editors_by_uuid() {
+        let mut first = GpuState::new(GpuInfo::new(
+            3,
+            "First GPU".to_string(),
+            "GPU-FIRST".to_string(),
+        ));
+        first.fan_speeds = vec![FanSpeed::new(40).unwrap()];
+        let mut second = GpuState::new(GpuInfo::new(
+            7,
+            "Second GPU".to_string(),
+            "GPU-SECOND".to_string(),
+        ));
+        second.fan_speeds = vec![FanSpeed::new(50).unwrap()];
+
+        let curve = FanCurve::new(
+            vec![FanCurvePoint::new(60, FanSpeed::new(70).unwrap())],
+            FanSpeed::new(35).unwrap(),
+        )
+        .unwrap();
+
+        let mut state = AppState::new();
+        state.gpus = vec![first, second];
+        state.select_gpu(1);
+        state.editing_curves[0] = Some(curve.clone());
+        state.curve_control_enabled[0] = true;
+        state.pending_power_limit = Some(PowerLimit::from_watts(275));
+
+        let mut refreshed_second = GpuState::new(GpuInfo::new(
+            1,
+            "Second GPU".to_string(),
+            "GPU-SECOND".to_string(),
+        ));
+        refreshed_second.fan_speeds = vec![FanSpeed::new(55).unwrap()];
+        let mut refreshed_first = GpuState::new(GpuInfo::new(
+            9,
+            "First GPU".to_string(),
+            "GPU-FIRST".to_string(),
+        ));
+        refreshed_first.fan_speeds = vec![FanSpeed::new(45).unwrap()];
+
+        state.replace_gpus_preserving_selection(vec![refreshed_second, refreshed_first]);
+
+        assert_eq!(state.selected_gpu, 0);
+        assert_eq!(state.current_gpu().unwrap().info.uuid, "GPU-SECOND");
+        assert_eq!(state.editing_curves, vec![Some(curve)]);
+        assert_eq!(state.curve_control_enabled, vec![true]);
+        assert_eq!(state.pending_power_limit, Some(PowerLimit::from_watts(275)));
+    }
+
+    #[test]
+    fn polling_resizes_editor_buffers_when_selected_gpu_fan_count_changes() {
+        let mut gpu = GpuState::new(GpuInfo::new(3, "GPU".to_string(), "GPU-STABLE".to_string()));
+        gpu.fan_speeds = vec![FanSpeed::from_percentage_clamped(50)];
+
+        let mut state = AppState::new();
+        state.gpus = vec![gpu];
+        state.init_curves_for_gpu(1);
+
+        state.update_gpu_by_uuid("GPU-STABLE", snapshot(8, 3));
+        assert_eq!(state.editing_curves.len(), 3);
+        assert_eq!(state.curve_control_enabled.len(), 3);
+        assert_eq!(state.current_gpu().map(|gpu| gpu.index), Some(8));
+
+        state.update_gpu(snapshot(8, 0));
+        assert!(state.editing_curves.is_empty());
+        assert!(state.curve_control_enabled.is_empty());
+        assert_eq!(state.selected_curve_fan, 0);
     }
 }

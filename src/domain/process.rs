@@ -12,41 +12,47 @@ pub struct GpuProcess {
     pub pid: u32,
     /// Process name (if available)
     pub name: Option<String>,
-    /// GPU memory used by this process (bytes)
-    pub used_memory: u64,
+    /// GPU memory used by this process (bytes), when NVML can report it.
+    pub used_memory: Option<u64>,
     /// Process type (graphics, compute, both)
     pub process_type: ProcessType,
 }
 
 impl GpuProcess {
     /// Create a new GPU process
-    pub fn new(pid: u32, used_memory: u64, process_type: ProcessType) -> Self {
+    pub fn new(pid: u32, used_memory: impl Into<Option<u64>>, process_type: ProcessType) -> Self {
         Self {
             pid,
             name: None,
-            used_memory,
+            used_memory: used_memory.into(),
             process_type,
         }
     }
 
     /// Create a new GPU process with name
-    pub fn with_name(pid: u32, name: String, used_memory: u64, process_type: ProcessType) -> Self {
+    pub fn with_name(
+        pid: u32,
+        name: String,
+        used_memory: impl Into<Option<u64>>,
+        process_type: ProcessType,
+    ) -> Self {
         Self {
             pid,
             name: Some(name),
-            used_memory,
+            used_memory: used_memory.into(),
             process_type,
         }
     }
 
     /// Get memory usage in MB
-    pub fn memory_mb(&self) -> f64 {
-        self.used_memory as f64 / 1024.0 / 1024.0
+    pub fn memory_mb(&self) -> Option<f64> {
+        self.used_memory.map(|bytes| bytes as f64 / 1024.0 / 1024.0)
     }
 
     /// Get memory usage in GB
-    pub fn memory_gb(&self) -> f64 {
-        self.used_memory as f64 / 1024.0 / 1024.0 / 1024.0
+    pub fn memory_gb(&self) -> Option<f64> {
+        self.used_memory
+            .map(|bytes| bytes as f64 / 1024.0 / 1024.0 / 1024.0)
     }
 
     /// Get display name (name or PID)
@@ -59,13 +65,18 @@ impl GpuProcess {
 
 impl fmt::Display for GpuProcess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "PID {} ({}): {:.1} MB",
-            self.pid,
-            self.process_type,
-            self.memory_mb()
-        )
+        match self.memory_mb() {
+            Some(memory_mb) => write!(
+                f,
+                "PID {} ({}): {:.1} MB",
+                self.pid, self.process_type, memory_mb
+            ),
+            None => write!(
+                f,
+                "PID {} ({}): memory unavailable",
+                self.pid, self.process_type
+            ),
+        }
     }
 }
 
@@ -111,13 +122,15 @@ pub struct ProcessList {
     /// List of processes
     pub processes: Vec<GpuProcess>,
     /// Total memory used by all processes (bytes)
-    pub total_used_memory: u64,
+    pub total_used_memory: Option<u64>,
 }
 
 impl ProcessList {
     /// Create a new process list
     pub fn new(processes: Vec<GpuProcess>) -> Self {
-        let total_used_memory = processes.iter().map(|p| p.used_memory).sum();
+        let total_used_memory = processes.iter().try_fold(0u64, |total, process| {
+            total.checked_add(process.used_memory?)
+        });
         Self {
             processes,
             total_used_memory,
@@ -130,19 +143,21 @@ impl ProcessList {
     }
 
     /// Get total memory usage in MB
-    pub fn total_memory_mb(&self) -> f64 {
-        self.total_used_memory as f64 / 1024.0 / 1024.0
+    pub fn total_memory_mb(&self) -> Option<f64> {
+        self.total_used_memory
+            .map(|bytes| bytes as f64 / 1024.0 / 1024.0)
     }
 
     /// Get total memory usage in GB
-    pub fn total_memory_gb(&self) -> f64 {
-        self.total_used_memory as f64 / 1024.0 / 1024.0 / 1024.0
+    pub fn total_memory_gb(&self) -> Option<f64> {
+        self.total_used_memory
+            .map(|bytes| bytes as f64 / 1024.0 / 1024.0 / 1024.0)
     }
 
     /// Get processes sorted by memory usage (descending)
     pub fn sorted_by_memory(&self) -> Vec<&GpuProcess> {
         let mut sorted: Vec<&GpuProcess> = self.processes.iter().collect();
-        sorted.sort_by(|a, b| b.used_memory.cmp(&a.used_memory));
+        sorted.sort_by_key(|process| std::cmp::Reverse(process.used_memory));
         sorted
     }
 
@@ -185,7 +200,7 @@ mod tests {
     fn test_gpu_process_creation() {
         let process = GpuProcess::new(1234, 512 * 1024 * 1024, ProcessType::Graphics);
         assert_eq!(process.pid, 1234);
-        assert_eq!(process.used_memory, 512 * 1024 * 1024);
+        assert_eq!(process.used_memory, Some(512 * 1024 * 1024));
         assert_eq!(process.process_type, ProcessType::Graphics);
         assert!(process.name.is_none());
     }
@@ -205,8 +220,8 @@ mod tests {
     #[test]
     fn test_gpu_process_memory_conversions() {
         let process = GpuProcess::new(1234, 1024 * 1024 * 1024, ProcessType::Compute); // 1 GB
-        assert_eq!(process.memory_mb(), 1024.0);
-        assert_eq!(process.memory_gb(), 1.0);
+        assert_eq!(process.memory_mb(), Some(1024.0));
+        assert_eq!(process.memory_gb(), Some(1.0));
     }
 
     #[test]
@@ -229,8 +244,20 @@ mod tests {
         assert_eq!(list.count(), 2);
         assert_eq!(
             list.total_used_memory,
-            512 * 1024 * 1024 + 1024 * 1024 * 1024
+            Some(512 * 1024 * 1024 + 1024 * 1024 * 1024)
         );
+    }
+
+    #[test]
+    fn unavailable_process_memory_stays_unknown() {
+        let list = ProcessList::new(vec![
+            GpuProcess::new(100, Some(1024), ProcessType::Graphics),
+            GpuProcess::new(200, None, ProcessType::Compute),
+        ]);
+
+        assert_eq!(list.total_used_memory, None);
+        assert_eq!(list.total_memory_mb(), None);
+        assert!(list.processes[1].to_string().contains("unavailable"));
     }
 
     #[test]

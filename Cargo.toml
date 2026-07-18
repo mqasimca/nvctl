@@ -4,13 +4,13 @@ resolver = "2"
 
 [package]
 name = "nvctl"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["nvctl contributors"]
 description = "NVML-based GPU control tool for fan curves, power limits, and thermal management"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/your-repo/nvctl"
+repository = "https://github.com/mqasimca/nvctl"
 keywords = ["nvidia", "gpu", "nvml", "fan-control", "power-management"]
 categories = ["command-line-utilities", "hardware-support"]
 
@@ -27,6 +27,7 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 dirs = "5"
+ctrlc = { version = "3.4", features = ["termination"] }
 
 [features]
 default = []

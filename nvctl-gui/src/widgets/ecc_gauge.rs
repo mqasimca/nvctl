@@ -47,7 +47,10 @@ impl EccGauge {
     fn total_errors(&self) -> u64 {
         self.ecc_errors
             .as_ref()
-            .map(|e| e.correctable_current + e.uncorrectable_current)
+            .map(|e| {
+                e.correctable_current
+                    .saturating_add(e.uncorrectable_current)
+            })
             .unwrap_or(0)
     }
 }
@@ -221,4 +224,15 @@ fn draw_arc(
             ..Default::default()
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn total_error_display_does_not_overflow() {
+        let gauge = EccGauge::new(Some(EccErrors::new(u64::MAX, 0, u64::MAX, 0)), 1);
+        assert_eq!(gauge.total_errors(), u64::MAX);
+    }
 }

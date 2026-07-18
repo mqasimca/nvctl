@@ -13,29 +13,31 @@ use crate::error::NvmlError;
 use crate::nvml::{GpuDevice, GpuManager};
 
 use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Mock GPU device for testing
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MockDevice {
     index: u32,
     name: String,
     uuid: String,
-    temperature: RwLock<Temperature>,
-    fan_speeds: Mutex<HashMap<u32, FanSpeed>>,
-    fan_policies: Mutex<HashMap<u32, FanPolicy>>,
+    fail_uuid_reads: Arc<AtomicBool>,
+    temperature: Arc<RwLock<Temperature>>,
+    fan_speeds: Arc<Mutex<HashMap<u32, FanSpeed>>>,
+    fan_policies: Arc<Mutex<HashMap<u32, FanPolicy>>>,
     fan_count: u32,
-    power_limit: Mutex<PowerLimit>,
+    power_limit: Arc<Mutex<PowerLimit>>,
     power_constraints: PowerConstraints,
     power_usage: PowerLimit,
     thermal_thresholds: ThermalThresholds,
-    acoustic_limits: RwLock<AcousticLimits>,
+    acoustic_limits: Arc<RwLock<AcousticLimits>>,
 }
 
 impl MockDevice {
     /// Create a new mock device with default values
     pub fn new(index: u32) -> Self {
-        let default_speed = FanSpeed::new(50).unwrap();
+        let default_speed = FanSpeed::from_percentage_clamped(50);
         let mut fan_speeds = HashMap::new();
         let mut fan_policies = HashMap::new();
         fan_speeds.insert(0, default_speed);
@@ -47,11 +49,12 @@ impl MockDevice {
             index,
             name: format!("Mock GPU {}", index),
             uuid: format!("GPU-MOCK-{:04}", index),
-            temperature: RwLock::new(Temperature::new(45)),
-            fan_speeds: Mutex::new(fan_speeds),
-            fan_policies: Mutex::new(fan_policies),
+            fail_uuid_reads: Arc::new(AtomicBool::new(false)),
+            temperature: Arc::new(RwLock::new(Temperature::new(45))),
+            fan_speeds: Arc::new(Mutex::new(fan_speeds)),
+            fan_policies: Arc::new(Mutex::new(fan_policies)),
             fan_count: 2,
-            power_limit: Mutex::new(PowerLimit::from_watts(300)),
+            power_limit: Arc::new(Mutex::new(PowerLimit::from_watts(300))),
             power_constraints: PowerConstraints::new(
                 PowerLimit::from_watts(100),
                 PowerLimit::from_watts(400),
@@ -63,17 +66,22 @@ impl MockDevice {
                 Some(Temperature::new(95)),
                 Some(Temperature::new(83)),
             ),
-            acoustic_limits: RwLock::new(AcousticLimits::new(
+            acoustic_limits: Arc::new(RwLock::new(AcousticLimits::new(
                 Some(Temperature::new(80)),
                 Some(Temperature::new(60)),
                 Some(Temperature::new(90)),
-            )),
+            ))),
         }
     }
 
     /// Set the mock temperature
     pub fn set_temperature(&self, temp: Temperature) {
         *self.temperature.write().unwrap() = temp;
+    }
+
+    /// Configure UUID reads to fail, for exercising downstream error paths.
+    pub fn fail_uuid_reads(&self, fail: bool) {
+        self.fail_uuid_reads.store(fail, Ordering::Relaxed);
     }
 
     /// Builder: set name
@@ -91,6 +99,17 @@ impl MockDevice {
     /// Builder: set fan count
     pub fn with_fan_count(mut self, count: u32) -> Self {
         self.fan_count = count;
+        let default_speed = FanSpeed::from_percentage_clamped(50);
+        let mut fan_speeds = self.fan_speeds.lock().unwrap();
+        let mut fan_policies = self.fan_policies.lock().unwrap();
+        fan_speeds.retain(|fan_index, _| *fan_index < count);
+        fan_policies.retain(|fan_index, _| *fan_index < count);
+        for fan_index in 0..count {
+            fan_speeds.entry(fan_index).or_insert(default_speed);
+            fan_policies.entry(fan_index).or_insert(FanPolicy::Auto);
+        }
+        drop(fan_speeds);
+        drop(fan_policies);
         self
     }
 
@@ -100,9 +119,6 @@ impl MockDevice {
         self
     }
 }
-
-// SAFETY: MockDevice uses Mutex/RwLock for interior mutability, making it Sync
-unsafe impl Sync for MockDevice {}
 
 impl GpuDevice for MockDevice {
     fn info(&self) -> Result<GpuInfo, NvmlError> {
@@ -117,6 +133,9 @@ impl GpuDevice for MockDevice {
     }
 
     fn uuid(&self) -> Result<String, NvmlError> {
+        if self.fail_uuid_reads.load(Ordering::Relaxed) {
+            return Err(NvmlError::GpuLost);
+        }
         Ok(self.uuid.clone())
     }
 
@@ -169,6 +188,11 @@ impl GpuDevice for MockDevice {
             )));
         }
         self.fan_speeds.lock().unwrap().insert(fan_idx, speed);
+        // nvmlDeviceSetFanSpeed_v2 implicitly changes the fan policy to manual.
+        self.fan_policies
+            .lock()
+            .unwrap()
+            .insert(fan_idx, FanPolicy::Manual);
         Ok(())
     }
 
@@ -193,6 +217,12 @@ impl GpuDevice for MockDevice {
     }
 
     fn cooler_target(&self, fan_idx: u32) -> Result<CoolerTarget, NvmlError> {
+        if fan_idx >= self.fan_count {
+            return Err(NvmlError::InvalidArgument(format!(
+                "Fan {} not found (count: {})",
+                fan_idx, self.fan_count
+            )));
+        }
         // Mock implementation: assign targets based on fan index
         // This simulates a typical 4-fan GPU layout
         match fan_idx {
@@ -339,50 +369,34 @@ impl MockManager {
     }
 }
 
-// SAFETY: MockManager only contains MockDevice which is Sync
-unsafe impl Sync for MockManager {}
-
 impl GpuManager for MockManager {
-    type Device = MockDevice;
+    type Device<'manager> = MockDevice;
 
     fn device_count(&self) -> Result<u32, NvmlError> {
         Ok(self.devices.len() as u32)
     }
 
-    fn device_by_index(&self, index: u32) -> Result<Self::Device, NvmlError> {
+    fn device_by_index(&self, index: u32) -> Result<Self::Device<'_>, NvmlError> {
         self.devices
             .get(index as usize)
-            .map(|d| MockDevice {
-                index: d.index,
-                name: d.name.clone(),
-                uuid: d.uuid.clone(),
-                temperature: RwLock::new(*d.temperature.read().unwrap()),
-                fan_speeds: Mutex::new(d.fan_speeds.lock().unwrap().clone()),
-                fan_policies: Mutex::new(d.fan_policies.lock().unwrap().clone()),
-                fan_count: d.fan_count,
-                power_limit: Mutex::new(*d.power_limit.lock().unwrap()),
-                power_constraints: d.power_constraints,
-                power_usage: d.power_usage,
-                thermal_thresholds: d.thermal_thresholds,
-                acoustic_limits: RwLock::new(*d.acoustic_limits.read().unwrap()),
-            })
+            .cloned()
             .ok_or(NvmlError::DeviceNotFound(index))
     }
 
-    fn device_by_uuid(&self, uuid: &str) -> Result<Self::Device, NvmlError> {
+    fn device_by_uuid(&self, uuid: &str) -> Result<Self::Device<'_>, NvmlError> {
         for d in &self.devices {
             if d.uuid == uuid {
-                return self.device_by_index(d.index);
+                return Ok(d.clone());
             }
         }
         Err(NvmlError::DeviceNotFoundByUuid(uuid.to_string()))
     }
 
-    fn device_by_name(&self, name: &str) -> Result<Self::Device, NvmlError> {
+    fn device_by_name(&self, name: &str) -> Result<Self::Device<'_>, NvmlError> {
         let name_lower = name.to_lowercase();
         for d in &self.devices {
             if d.name.to_lowercase().contains(&name_lower) {
-                return self.device_by_index(d.index);
+                return Ok(d.clone());
             }
         }
         Err(NvmlError::Unknown(format!(
@@ -409,6 +423,18 @@ mod tests {
         let device = MockDevice::new(0);
         assert_eq!(device.index(), 0);
         assert_eq!(device.fan_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn fan_count_builder_keeps_mock_fan_state_consistent() {
+        let device = MockDevice::new(0).with_fan_count(4);
+        for fan_index in 0..4 {
+            assert!(device.fan_speed(fan_index).is_ok());
+            assert!(device.fan_policy(fan_index).is_ok());
+            assert!(device.cooler_target(fan_index).is_ok());
+        }
+        assert!(device.fan_speed(4).is_err());
+        assert!(device.cooler_target(4).is_err());
     }
 
     #[test]
@@ -477,5 +503,24 @@ mod tests {
         assert_eq!(device.index(), 0);
 
         assert!(manager.device_by_uuid("GPU-INVALID").is_err());
+    }
+
+    #[test]
+    fn manager_handles_share_device_state() {
+        let manager = MockManager::new(1);
+        let mut first_handle = manager.device_by_index(0).unwrap();
+        first_handle
+            .set_power_limit(PowerLimit::from_watts(250))
+            .unwrap();
+        first_handle
+            .set_fan_speed(0, FanSpeed::new(70).unwrap())
+            .unwrap();
+
+        let second_handle = manager.device_by_index(0).unwrap();
+        assert_eq!(
+            second_handle.power_limit().unwrap(),
+            PowerLimit::from_watts(250)
+        );
+        assert_eq!(second_handle.fan_speed(0).unwrap().as_percentage(), 70);
     }
 }

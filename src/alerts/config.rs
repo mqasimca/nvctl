@@ -5,12 +5,14 @@
 use super::types::{AlertRule, AlertSeverity, Condition, GpuFilter, MetricType};
 use crate::error::{ConfigError, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Alert configuration file structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertConfig {
     /// Global alert settings
     #[serde(default)]
@@ -24,18 +26,42 @@ impl AlertConfig {
     /// Load configuration from file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().display().to_string();
-        let contents = fs::read_to_string(path.as_ref())
-            .map_err(|_| ConfigError::FileNotFound(path_str.clone()))?;
+        let contents = fs::read_to_string(path.as_ref()).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ConfigError::FileNotFound(path_str.clone())
+            } else {
+                ConfigError::ReadError {
+                    path: path_str.clone(),
+                    message: error.to_string(),
+                }
+            }
+        })?;
 
-        Ok(toml::from_str(&contents).map_err(|e| ConfigError::ParseError(format!("{}", e)))?)
+        let config: Self =
+            toml::from_str(&contents).map_err(|e| ConfigError::ParseError(format!("{}", e)))?;
+        config.validate()?;
+        Ok(config)
     }
 
     /// Save configuration to file
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        self.validate()?;
         let contents = toml::to_string_pretty(self)
             .map_err(|e| ConfigError::ParseError(format!("Failed to serialize: {}", e)))?;
 
-        fs::write(path.as_ref(), contents)?;
+        let path = path.as_ref();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+        fs::write(&temporary, contents)?;
+        if let Err(error) = fs::rename(&temporary, path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
 
         Ok(())
     }
@@ -126,11 +152,50 @@ impl AlertConfig {
 
     /// Convert to alert rules
     pub fn to_alert_rules(&self) -> Result<Vec<AlertRule>> {
+        self.validate()?;
         self.rules
             .iter()
-            .filter(|r| r.enabled)
             .map(|r| r.to_alert_rule())
+            .filter(|rule| rule.as_ref().map_or(true, |rule| rule.enabled))
             .collect()
+    }
+
+    /// Validate settings and every rule, including disabled rules.
+    pub fn validate(&self) -> Result<()> {
+        if self.settings.check_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "settings.check_interval_secs".to_string(),
+                message: "must be greater than zero".to_string(),
+            }
+            .into());
+        }
+
+        let mut ids = HashSet::new();
+        for rule in &self.rules {
+            if rule.id.trim().is_empty() {
+                return Err(ConfigError::InvalidValue {
+                    key: "rules.id".to_string(),
+                    message: "must not be empty".to_string(),
+                }
+                .into());
+            }
+            if !ids.insert(rule.id.clone()) {
+                return Err(ConfigError::InvalidValue {
+                    key: "rules.id".to_string(),
+                    message: format!("duplicate rule ID '{}'", rule.id),
+                }
+                .into());
+            }
+            if rule.name.trim().is_empty() {
+                return Err(ConfigError::InvalidValue {
+                    key: format!("rules.{}.name", rule.id),
+                    message: "must not be empty".to_string(),
+                }
+                .into());
+            }
+            rule.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -142,6 +207,7 @@ impl Default for AlertConfig {
 
 /// Global alert settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertSettings {
     /// Whether alerting is enabled globally
     #[serde(default = "default_true")]
@@ -178,6 +244,7 @@ fn default_max_history() -> usize {
 
 /// Alert rule configuration (TOML-friendly format)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertRuleConfig {
     /// Rule identifier
     pub id: String,
@@ -276,12 +343,21 @@ impl AlertRuleConfig {
                 })?;
                 Ok(GpuFilter::Index(idx))
             }
-            s if s.starts_with("uuid:") => Ok(GpuFilter::Uuid(s[5..].to_string())),
+            s if s.starts_with("uuid:") && !s[5..].trim().is_empty() => {
+                Ok(GpuFilter::Uuid(s[5..].to_string()))
+            }
             _ => Err(ConfigError::InvalidValue {
                 key: "gpu_filter".to_string(),
                 message: format!("Unknown GPU filter: {}", self.gpu_filter),
             })?,
         }
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.parse_metric()?;
+        self.parse_severity()?;
+        self.parse_gpu_filter()?;
+        self.condition.validate().map_err(Into::into)
     }
 }
 
@@ -305,6 +381,31 @@ impl ConditionConfig {
             Self::InRange { min, max } => Condition::InRange(*min, *max),
             Self::OutsideRange { min, max } => Condition::OutsideRange(*min, *max),
         }
+    }
+
+    fn validate(&self) -> std::result::Result<(), ConfigError> {
+        let invalid = |message: String| ConfigError::InvalidValue {
+            key: "condition".to_string(),
+            message,
+        };
+        match self {
+            Self::GreaterThan(value) | Self::LessThan(value) | Self::Equals(value) => {
+                if !value.is_finite() {
+                    return Err(invalid("threshold must be finite".to_string()));
+                }
+            }
+            Self::InRange { min, max } | Self::OutsideRange { min, max } => {
+                if !min.is_finite() || !max.is_finite() {
+                    return Err(invalid("range bounds must be finite".to_string()));
+                }
+                if min > max {
+                    return Err(invalid(format!(
+                        "range minimum {min} exceeds maximum {max}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -416,5 +517,51 @@ mod tests {
         let condition = config.to_condition();
         assert!(condition.evaluate(85.0));
         assert!(!condition.evaluate(75.0));
+    }
+
+    #[test]
+    fn invalid_global_and_rule_configuration_is_rejected() {
+        let mut config = AlertConfig::default();
+        config.settings.check_interval_secs = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = AlertConfig::default();
+        config.rules[1].id = config.rules[0].id.clone();
+        assert!(config.validate().is_err());
+
+        let mut config = AlertConfig::default();
+        config.rules[0].condition = ConditionConfig::GreaterThan(f64::NAN);
+        assert!(config.validate().is_err());
+
+        let mut config = AlertConfig::default();
+        config.rules[0].condition = ConditionConfig::InRange {
+            min: 90.0,
+            max: 80.0,
+        };
+        assert!(config.validate().is_err());
+
+        let mut config = AlertConfig::default();
+        config.rules[0].gpu_filter = "uuid:   ".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn unknown_configuration_fields_are_rejected() {
+        assert!(toml::from_str::<AlertConfig>(
+            "[settings]\ncheck_interval_secs = 5\ncheck_intervl_secs = 2\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unreadable_alert_path_is_not_reported_as_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = AlertConfig::load(directory.path());
+        assert!(matches!(
+            result,
+            Err(crate::error::AppError::Config(
+                ConfigError::ReadError { .. }
+            ))
+        ));
     }
 }

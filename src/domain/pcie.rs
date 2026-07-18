@@ -28,12 +28,12 @@ impl PcieGeneration {
     /// Get theoretical bandwidth per lane in GB/s
     pub fn bandwidth_per_lane_gbps(&self) -> f64 {
         match self {
-            Self::Gen1 => 0.25,  // 2.5 GT/s * 8/10 encoding
-            Self::Gen2 => 0.5,   // 5.0 GT/s * 8/10 encoding
-            Self::Gen3 => 0.985, // 8.0 GT/s * 128/130 encoding
-            Self::Gen4 => 1.969, // 16.0 GT/s * 128/130 encoding
-            Self::Gen5 => 3.938, // 32.0 GT/s * 128/130 encoding
-            Self::Gen6 => 7.877, // 64.0 GT/s * 128/130 encoding
+            Self::Gen1 => 0.25,   // 2.5 GT/s * 8/10 encoding
+            Self::Gen2 => 0.5,    // 5.0 GT/s * 8/10 encoding
+            Self::Gen3 => 0.985,  // 8.0 GT/s * 128/130 encoding
+            Self::Gen4 => 1.969,  // 16.0 GT/s * 128/130 encoding
+            Self::Gen5 => 3.938,  // 32.0 GT/s * 128/130 encoding
+            Self::Gen6 => 7.5625, // 64.0 GT/s * 242/256 FLIT efficiency
         }
     }
 
@@ -143,19 +143,19 @@ impl PcieLinkStatus {
         self.current_generation == self.max_generation && self.current_width == self.max_width
     }
 
-    /// Get current theoretical maximum bandwidth in GB/s (bidirectional)
+    /// Get current theoretical maximum bandwidth in GB/s per direction
     pub fn current_bandwidth_gbps(&self) -> f64 {
         self.current_generation.bandwidth_per_lane_gbps() * self.current_width.lanes() as f64
     }
 
-    /// Get maximum theoretical bandwidth in GB/s (bidirectional)
+    /// Get maximum theoretical bandwidth in GB/s per direction
     pub fn max_bandwidth_gbps(&self) -> f64 {
         self.max_generation.bandwidth_per_lane_gbps() * self.max_width.lanes() as f64
     }
 
     /// Get bandwidth utilization as percentage of maximum capability
     pub fn bandwidth_efficiency_percent(&self) -> f64 {
-        (self.current_bandwidth_gbps() / self.max_bandwidth_gbps()) * 100.0
+        ((self.current_bandwidth_gbps() / self.max_bandwidth_gbps()) * 100.0).clamp(0.0, 100.0)
     }
 }
 
@@ -232,9 +232,10 @@ impl PcieThroughput {
 
     /// Calculate bandwidth utilization percentage
     pub fn utilization_percent(&self, link_status: &PcieLinkStatus) -> f64 {
-        let max_bandwidth_bytes_per_sec = link_status.current_bandwidth_gbps() * 1_000_000_000.0;
-        let total_bytes_per_sec = (self.tx_bytes_per_sec + self.rx_bytes_per_sec) as f64;
-        (total_bytes_per_sec / max_bandwidth_bytes_per_sec) * 100.0
+        let max_bandwidth_bytes_per_sec =
+            link_status.current_bandwidth_gbps() * 2.0 * 1_000_000_000.0;
+        let total_bytes_per_sec = self.tx_bytes_per_sec as f64 + self.rx_bytes_per_sec as f64;
+        ((total_bytes_per_sec / max_bandwidth_bytes_per_sec) * 100.0).clamp(0.0, 100.0)
     }
 }
 
@@ -310,11 +311,9 @@ impl PcieMetrics {
 
     /// Check if PCIe link is healthy
     pub fn is_healthy(&self) -> bool {
-        // Healthy if:
-        // - No replay errors
-        // - Operating at reasonable bandwidth (>50% of max)
+        // GPUs commonly downshift their negotiated link while idle. Without
+        // workload context, replay errors are the reliable health signal.
         !self.replay_counter.is_problematic()
-            && self.link_status.bandwidth_efficiency_percent() > 50.0
     }
 }
 
@@ -326,6 +325,7 @@ mod tests {
     fn test_pcie_generation_bandwidth() {
         assert_eq!(PcieGeneration::Gen3.bandwidth_per_lane_gbps(), 0.985);
         assert_eq!(PcieGeneration::Gen4.bandwidth_per_lane_gbps(), 1.969);
+        assert_eq!(PcieGeneration::Gen6.bandwidth_per_lane_gbps(), 7.5625);
     }
 
     #[test]
@@ -403,12 +403,16 @@ mod tests {
             PcieLinkWidth::X16,
         );
 
-        // Max bandwidth ~31.5 GB/s
-        // Using 15.75 GB/s = 50% utilization
-        let throughput = PcieThroughput::new(7_875_000_000, 7_875_000_000);
+        // Full-duplex capacity is ~31.5 GB/s in each direction. Using half
+        // the capacity in both directions is 50% aggregate utilization.
+        let throughput = PcieThroughput::new(15_752_000_000, 15_752_000_000);
         let util = throughput.utilization_percent(&link_status);
 
         assert!((util - 50.0).abs() < 1.0);
+
+        // Adding the counters in integer space would overflow here.
+        let extreme = PcieThroughput::new(u64::MAX, u64::MAX).utilization_percent(&link_status);
+        assert_eq!(extreme, 100.0);
     }
 
     #[test]

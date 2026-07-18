@@ -168,7 +168,7 @@ impl MemoryInfo {
         if self.total == 0 {
             0.0
         } else {
-            self.used as f32 / self.total as f32
+            (self.used as f32 / self.total as f32).clamp(0.0, 1.0)
         }
     }
 
@@ -382,6 +382,13 @@ mod tests {
         assert!((mem.total_gb() - 8.0).abs() < 0.001);
         assert!((mem.usage_ratio() - 0.25).abs() < 0.001);
         assert_eq!(mem.usage_percent(), 25);
+    }
+
+    #[test]
+    fn inconsistent_memory_counters_do_not_wrap_usage_percentage() {
+        let mem = MemoryInfo::new(100, 150, 0);
+        assert_eq!(mem.usage_ratio(), 1.0);
+        assert_eq!(mem.usage_percent(), 100);
     }
 
     #[test]
