@@ -8,6 +8,7 @@ pub mod file;
 pub use builder::ConfigBuilder;
 pub use file::ConfigFile;
 
+pub use crate::automation::{AutomationConfig, AutomationRule, ProcessMatchType};
 use crate::domain::{FanCurve, FanCurvePoint, FanSpeed, PowerLimit};
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +27,8 @@ pub struct Config {
     pub power: PowerConfig,
     /// Thermal settings
     pub thermal: ThermalConfig,
+    /// Workload-aware profile automation settings
+    pub automation: AutomationConfig,
 }
 
 impl Config {
@@ -83,6 +86,12 @@ impl Config {
             .to_power_limit()
             .map_err(|error| crate::error::ConfigError::InvalidValue {
                 key: "power.limit_watts".to_string(),
+                message: error.to_string(),
+            })?;
+        self.automation
+            .validate()
+            .map_err(|error| crate::error::ConfigError::InvalidValue {
+                key: "automation".to_string(),
                 message: error.to_string(),
             })?;
         Ok(())
@@ -272,5 +281,15 @@ mod tests {
         config.gpu.name = None;
         config.gpu.uuid = Some(String::new());
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn checked_in_automation_example_stays_valid() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/automation/nvctl.toml");
+        let config = ConfigFile::load(path).unwrap();
+        assert!(config.automation.enabled);
+        assert_eq!(config.automation.rules.len(), 2);
+        assert_eq!(config.automation.fallback_profile.as_deref(), Some("Quiet"));
     }
 }

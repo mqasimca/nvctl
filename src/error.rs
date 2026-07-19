@@ -20,6 +20,22 @@ pub enum AppError {
     #[error("Domain validation error: {0}")]
     Domain(#[from] DomainError),
 
+    /// Error while discovering or loading saved profiles
+    #[error("Profile error: {0}")]
+    ProfileLoad(#[from] crate::profiles::ProfileLoadError),
+
+    /// Error while applying or restoring a profile
+    #[error("Profile application error: {0}")]
+    ProfileApply(#[from] crate::services::profile_controller::ProfileApplyError),
+
+    /// Error in workload automation configuration or rule evaluation
+    #[error("Automation error: {0}")]
+    Automation(#[from] crate::automation::AutomationError),
+
+    /// Another nvctl process owns a selected GPU, or its lock could not be acquired
+    #[error("GPU mutation lock error: {0}")]
+    MutationLock(#[from] crate::services::mutation_lock::MutationLockError),
+
     /// GPU not found by name or UUID
     #[error("GPU not found: {0}")]
     GpuNotFound(String),

@@ -2,8 +2,7 @@
 //!
 //! Handles saving, loading, and managing GPU configuration profiles.
 
-use nvctl::domain::{FanCurve, PowerLimit, Temperature};
-use serde::{Deserialize, Serialize};
+pub use nvctl::profiles::{GpuSettings, Profile};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -34,177 +33,6 @@ pub enum ProfileError {
 
     #[error("Invalid profile: {0}")]
     InvalidProfile(String),
-}
-
-/// A saved GPU configuration profile
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Profile {
-    /// Profile name (unique identifier)
-    pub name: String,
-
-    /// Optional description
-    #[serde(default)]
-    pub description: Option<String>,
-
-    /// GPU-specific settings, keyed by GPU UUID or index
-    #[serde(default)]
-    pub gpu_settings: HashMap<String, GpuSettings>,
-
-    /// Whether this is the default profile to load on startup
-    #[serde(default)]
-    pub is_default: bool,
-
-    /// Creation timestamp (ISO 8601)
-    #[serde(default)]
-    pub created_at: Option<String>,
-
-    /// Last modified timestamp (ISO 8601)
-    #[serde(default)]
-    pub modified_at: Option<String>,
-}
-
-#[allow(dead_code)]
-impl Profile {
-    /// Create a new empty profile
-    pub fn new(name: impl Into<String>) -> Self {
-        let now = chrono::Utc::now().to_rfc3339();
-        Self {
-            name: name.into(),
-            description: None,
-            gpu_settings: HashMap::new(),
-            is_default: false,
-            created_at: Some(now.clone()),
-            modified_at: Some(now),
-        }
-    }
-
-    /// Create a profile with a description
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    /// Add settings for a GPU
-    pub fn with_gpu_settings(mut self, gpu_id: impl Into<String>, settings: GpuSettings) -> Self {
-        self.gpu_settings.insert(gpu_id.into(), settings);
-        self
-    }
-
-    /// Mark as default profile
-    #[allow(clippy::wrong_self_convention)]
-    pub fn as_default(mut self) -> Self {
-        self.is_default = true;
-        self
-    }
-
-    /// Update the modified timestamp
-    pub fn touch(&mut self) {
-        self.modified_at = Some(chrono::Utc::now().to_rfc3339());
-    }
-}
-
-/// Settings for a single GPU within a profile
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GpuSettings {
-    /// Legacy single fan curve configuration (applied to every fan)
-    #[serde(default)]
-    pub fan_curve: Option<FanCurve>,
-
-    /// Per-fan curve configuration
-    #[serde(default)]
-    pub fan_curves: Vec<FanCurve>,
-
-    /// Per-fan enabled state. Missing legacy values mean enabled.
-    #[serde(default)]
-    pub fan_curve_enabled: Vec<bool>,
-
-    /// Power limit in watts
-    #[serde(default)]
-    pub power_limit: Option<PowerLimit>,
-
-    /// Target acoustic temperature limit
-    #[serde(default)]
-    pub acoustic_limit: Option<Temperature>,
-
-    /// Whether to apply fan curve on load
-    #[serde(default)]
-    pub apply_fan_curve: bool,
-
-    /// Whether to apply power limit on load
-    #[serde(default)]
-    pub apply_power_limit: bool,
-}
-
-#[allow(dead_code)]
-impl GpuSettings {
-    /// Create new GPU settings
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set fan curve
-    pub fn with_fan_curve(mut self, curve: FanCurve) -> Self {
-        self.fan_curve = Some(curve);
-        self.fan_curves.clear();
-        self.fan_curve_enabled.clear();
-        self.apply_fan_curve = true;
-        self
-    }
-
-    /// Set distinct curves and enabled state for each fan.
-    pub fn with_fan_curves(mut self, curves: Vec<FanCurve>, enabled: Vec<bool>) -> Self {
-        self.fan_curve = None;
-        self.fan_curves = curves;
-        self.fan_curve_enabled = enabled;
-        self.apply_fan_curve = true;
-        self
-    }
-
-    /// Resolve per-fan settings, expanding legacy single-curve profiles.
-    pub fn resolved_fan_curves(&self, fan_count: usize) -> Vec<(FanCurve, bool)> {
-        if !self.fan_curves.is_empty() {
-            return self
-                .fan_curves
-                .iter()
-                .take(fan_count)
-                .enumerate()
-                .map(|(index, curve)| {
-                    (
-                        curve.clone(),
-                        self.fan_curve_enabled.get(index).copied().unwrap_or(true),
-                    )
-                })
-                .collect();
-        }
-
-        self.fan_curve
-            .as_ref()
-            .map(|curve| vec![(curve.clone(), true); fan_count])
-            .unwrap_or_default()
-    }
-
-    /// Set power limit
-    pub fn with_power_limit(mut self, limit: PowerLimit) -> Self {
-        self.power_limit = Some(limit);
-        self.apply_power_limit = true;
-        self
-    }
-
-    /// Set an acoustic temperature target.
-    pub fn with_acoustic_limit(mut self, limit: Temperature) -> Self {
-        self.acoustic_limit = Some(limit);
-        self
-    }
-
-    /// Check if any settings are configured
-    pub fn has_settings(&self) -> bool {
-        self.fan_curve.is_some()
-            || !self.fan_curves.is_empty()
-            || self.power_limit.is_some()
-            || self.acoustic_limit.is_some()
-    }
 }
 
 /// Profile service for managing profiles
@@ -648,7 +476,8 @@ pub fn create_default_profiles() -> Vec<Profile> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nvctl::domain::{FanCurvePoint, FanSpeed};
+    use nvctl::domain::{FanCurve, FanCurvePoint, FanSpeed};
+    use nvctl::domain::{PowerLimit, Temperature};
 
     fn service_in(path: &Path) -> ProfileService {
         ProfileService {

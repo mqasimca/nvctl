@@ -1,0 +1,30 @@
+[general]
+verbose = false
+dry_run = false
+
+[gpu]
+name = "RTX 5080"
+
+[automation]
+enabled = true
+interval_seconds = 2
+cooldown_seconds = 10
+release_delay_seconds = 5
+fallback_profile = "Quiet"
+profiles_dir = "examples/automation/profiles"
+
+[[automation.rules]]
+name = "games"
+profile = "Performance"
+processes = ["steam_app_*", "*game*", "wine*"]
+process_type = "graphics"
+priority = 100
+min_duration_seconds = 3
+
+[[automation.rules]]
+name = "gpu-rendering"
+profile = "Performance"
+processes = ["blender", "resolve", "ffmpeg"]
+process_type = "compute"
+priority = 80
+min_duration_seconds = 5

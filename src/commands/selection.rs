@@ -100,6 +100,14 @@ pub fn select_gpu_indices<M: GpuManager>(manager: &M, selector: &GpuSelector) ->
     }
 }
 
+/// Resolve selected indices to stable UUIDs before a controller captures state.
+pub fn resolve_gpu_uuids<M: GpuManager>(manager: &M, indices: &[u32]) -> Result<Vec<String>> {
+    indices
+        .iter()
+        .map(|index| manager.device_by_index(*index)?.uuid().map_err(Into::into))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +157,14 @@ mod tests {
             select_gpu_indices(&manager, &GpuSelector::Name("4090".into())),
             Err(AppError::Config(ConfigError::InvalidValue { .. }))
         ));
+    }
+
+    #[test]
+    fn resolves_stable_uuids_for_selected_indices() {
+        let manager = MockManager::new(2);
+        assert_eq!(
+            resolve_gpu_uuids(&manager, &[1, 0]).unwrap(),
+            vec!["GPU-MOCK-0001", "GPU-MOCK-0000"]
+        );
     }
 }

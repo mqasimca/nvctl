@@ -6,8 +6,8 @@
 use clap::Parser;
 use nvctl::cli::args::{generate_completions, Cli, Commands};
 use nvctl::commands::{
-    run_alerts, run_control, run_fan, run_health, run_info, run_list, run_power, run_processes,
-    run_thermal, GpuSelector,
+    run_alerts, run_auto, run_control, run_fan, run_health, run_info, run_list, run_power,
+    run_processes, run_profile, run_thermal, GpuSelector,
 };
 use nvctl::config::{Config, ConfigBuilder};
 use nvctl::error::AppError;
@@ -87,6 +87,10 @@ fn run(cli: &Cli, config: &Config) -> Result<(), AppError> {
         Commands::Health => run_health(cli.format, &selector),
 
         Commands::Processes(args) => run_processes(args, cli.format, &selector),
+
+        Commands::Profile(args) => run_profile(args, cli.format, &selector, config),
+
+        Commands::Auto(args) => run_auto(args, cli.format, &selector, config),
 
         Commands::Completions { shell } => {
             generate_completions(*shell);

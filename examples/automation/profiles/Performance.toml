@@ -1,0 +1,7 @@
+name = "Performance"
+description = "Stock RTX 5080 power target for matched games and render workloads"
+is_default = false
+
+[gpu_settings.default]
+power_limit = 400000
+apply_power_limit = true

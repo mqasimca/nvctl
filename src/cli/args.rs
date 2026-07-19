@@ -75,6 +75,12 @@ pub enum Commands {
     /// List processes running on GPU
     Processes(ProcessesArgs),
 
+    /// Inspect or run saved GPU profiles
+    Profile(ProfileArgs),
+
+    /// Switch profiles automatically based on GPU workloads
+    Auto(AutoArgs),
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -219,6 +225,72 @@ pub struct ProcessesArgs {
     /// Filter by process type
     #[arg(short = 't', long, value_enum)]
     pub process_type: Option<ProcessTypeFilter>,
+}
+
+/// Arguments for saved profile commands
+#[derive(Parser, Debug)]
+pub struct ProfileArgs {
+    #[command(subcommand)]
+    pub command: ProfileCommands,
+}
+
+/// Saved profile subcommands
+#[derive(Subcommand, Debug)]
+pub enum ProfileCommands {
+    /// List saved profiles
+    List,
+
+    /// Show the complete settings in one profile
+    Show {
+        /// Exact profile name
+        name: String,
+    },
+
+    /// Apply a profile while this foreground process is running
+    Run {
+        /// Exact profile name
+        name: String,
+
+        /// Fan-curve update interval in seconds
+        #[arg(short, long, value_parser = clap::value_parser!(u64).range(1..))]
+        interval: Option<u64>,
+
+        /// Apply one update, restore the original GPU state, and exit
+        #[arg(long)]
+        single_use: bool,
+    },
+}
+
+/// Arguments for workload automation commands
+#[derive(Parser, Debug)]
+pub struct AutoArgs {
+    #[command(subcommand)]
+    pub command: AutoCommands,
+}
+
+/// Workload automation subcommands
+#[derive(Subcommand, Debug)]
+pub enum AutoCommands {
+    /// Run workload-aware profile switching in the foreground
+    Run {
+        /// Process and fan-curve polling interval in seconds
+        #[arg(short, long, value_parser = clap::value_parser!(u64).range(1..))]
+        interval: Option<u64>,
+
+        /// Evaluate and reconcile once, restore the original state, and exit
+        #[arg(long)]
+        single_use: bool,
+
+        /// Run even when automation.enabled is false
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Explain which rule matches the currently running GPU workloads
+    Explain,
+
+    /// Show the active automation process and most recent decision
+    Status,
 }
 
 /// Process type filter for CLI
@@ -458,5 +530,51 @@ mod tests {
         assert!(
             Cli::try_parse_from(["nvctl", "processes", "--sort-memory", "--sort-pid"]).is_err()
         );
+    }
+
+    #[test]
+    fn parses_profile_and_auto_commands() {
+        let profile = Cli::try_parse_from([
+            "nvctl",
+            "--dry-run",
+            "profile",
+            "run",
+            "Gaming",
+            "--single-use",
+        ])
+        .unwrap();
+        let Commands::Profile(profile) = profile.command else {
+            panic!("expected profile command");
+        };
+        assert!(matches!(
+            profile.command,
+            ProfileCommands::Run {
+                name,
+                interval: None,
+                single_use: true
+            } if name == "Gaming"
+        ));
+
+        let auto =
+            Cli::try_parse_from(["nvctl", "auto", "run", "--interval", "3", "--force"]).unwrap();
+        let Commands::Auto(auto) = auto.command else {
+            panic!("expected auto command");
+        };
+        assert!(matches!(
+            auto.command,
+            AutoCommands::Run {
+                interval: Some(3),
+                single_use: false,
+                force: true
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_profile_and_auto_intervals() {
+        assert!(
+            Cli::try_parse_from(["nvctl", "profile", "run", "Gaming", "--interval", "0"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["nvctl", "auto", "run", "--interval", "0"]).is_err());
     }
 }

@@ -6,9 +6,13 @@
 pub mod alert_service;
 pub mod fan_service;
 pub mod monitor;
+pub mod mutation_lock;
 pub mod power_service;
+pub mod profile_controller;
 
 pub use alert_service::AlertService;
 pub use fan_service::FanService;
 pub use monitor::Monitor;
+pub use mutation_lock::{GpuMutationGuard, MutationLockError};
 pub use power_service::PowerService;
+pub use profile_controller::{ProfileApplyError, ProfileApplyReport, ProfileController};

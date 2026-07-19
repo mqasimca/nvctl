@@ -16,6 +16,7 @@
 //! - [`services`]: Business logic services
 
 pub mod alerts;
+pub mod automation;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -23,6 +24,7 @@ pub mod domain;
 pub mod error;
 pub mod health;
 pub mod nvml;
+pub mod profiles;
 pub mod services;
 
 /// Mock implementations for testing

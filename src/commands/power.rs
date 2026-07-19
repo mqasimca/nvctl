@@ -4,10 +4,11 @@
 
 use crate::cli::args::{OutputFormat, PowerArgs, PowerCommands};
 use crate::cli::output::{Message, OutputWriter, PowerStatus};
-use crate::commands::selection::{select_gpu_indices, GpuSelector};
+use crate::commands::selection::{resolve_gpu_uuids, select_gpu_indices, GpuSelector};
 use crate::domain::PowerLimit;
 use crate::error::Result;
 use crate::nvml::{GpuDevice, GpuManager, NvmlManager};
+use crate::services::GpuMutationGuard;
 
 /// Execute power commands
 pub fn run_power(
@@ -21,7 +22,12 @@ pub fn run_power(
     match &args.command {
         PowerCommands::Status => run_power_status(&manager, format, selector),
         PowerCommands::Limit { watts } => {
-            run_power_limit(&manager, *watts, format, selector, dry_run)
+            let indices = select_gpu_indices(&manager, selector)?;
+            let target_uuids = resolve_gpu_uuids(&manager, &indices)?;
+            let _mutation_guard = (!dry_run)
+                .then(|| GpuMutationGuard::acquire(&target_uuids, "power limit"))
+                .transpose()?;
+            run_power_limit(&manager, *watts, format, &target_uuids, dry_run)
         }
     }
 }
@@ -63,18 +69,18 @@ fn run_power_limit<M: GpuManager>(
     manager: &M,
     watts: u32,
     format: OutputFormat,
-    selector: &GpuSelector,
+    target_uuids: &[String],
     dry_run: bool,
 ) -> Result<()> {
     let limit = PowerLimit::try_from_watts(watts)?;
 
-    let indices = select_gpu_indices(manager, selector)?;
     let mut output = OutputWriter::new(format);
-    let mut targets = Vec::with_capacity(indices.len());
+    let mut targets = Vec::with_capacity(target_uuids.len());
 
     // Validate every selected GPU before mutating any of them.
-    for &idx in &indices {
-        let device = manager.device_by_index(idx)?;
+    for uuid in target_uuids {
+        let device = manager.device_by_uuid(uuid)?;
+        let idx = device.index();
         limit.validate(&device.power_constraints()?)?;
         let info = device.info()?;
         targets.push((idx, info.uuid, info.name, device.power_limit()?));
@@ -184,14 +190,14 @@ mod tests {
         let manager = FailingUuidLookupManager {
             inner: MockManager::new(2),
             uuid_lookups: AtomicUsize::new(0),
-            fail_on_lookup: 1,
+            fail_on_lookup: 3,
         };
 
         assert!(run_power_limit(
             &manager,
             250,
             OutputFormat::Compact,
-            &GpuSelector::All,
+            &["GPU-MOCK-0000".to_string(), "GPU-MOCK-0001".to_string()],
             false,
         )
         .is_err());

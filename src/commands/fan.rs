@@ -4,10 +4,11 @@
 
 use crate::cli::args::{FanArgs, FanCommands, FanPolicyArg, OutputFormat};
 use crate::cli::output::{FanInfo, FanStatus, Message, OutputWriter};
-use crate::commands::selection::{select_gpu_indices, GpuSelector};
+use crate::commands::selection::{resolve_gpu_uuids, select_gpu_indices, GpuSelector};
 use crate::domain::{FanPolicy, FanSpeed};
 use crate::error::{NvmlError, Result};
 use crate::nvml::{GpuDevice, GpuManager, NvmlManager};
+use crate::services::GpuMutationGuard;
 
 /// Execute fan commands
 pub fn run_fan(
@@ -21,10 +22,20 @@ pub fn run_fan(
     match &args.command {
         FanCommands::Status => run_fan_status(&manager, format, selector),
         FanCommands::Policy { policy } => {
-            run_fan_policy(&manager, *policy, format, selector, dry_run)
+            let indices = select_gpu_indices(&manager, selector)?;
+            let target_uuids = resolve_gpu_uuids(&manager, &indices)?;
+            let _mutation_guard = (!dry_run)
+                .then(|| GpuMutationGuard::acquire(&target_uuids, "fan policy"))
+                .transpose()?;
+            run_fan_policy(&manager, *policy, format, &target_uuids, dry_run)
         }
         FanCommands::Speed { speed, fan_index } => {
-            run_fan_speed(&manager, *speed, *fan_index, format, selector, dry_run)
+            let indices = select_gpu_indices(&manager, selector)?;
+            let target_uuids = resolve_gpu_uuids(&manager, &indices)?;
+            let _mutation_guard = (!dry_run)
+                .then(|| GpuMutationGuard::acquire(&target_uuids, "fan speed"))
+                .transpose()?;
+            run_fan_speed(&manager, *speed, *fan_index, format, &target_uuids, dry_run)
         }
     }
 }
@@ -75,7 +86,7 @@ fn run_fan_policy<M: GpuManager>(
     manager: &M,
     policy_arg: FanPolicyArg,
     format: OutputFormat,
-    selector: &GpuSelector,
+    target_uuids: &[String],
     dry_run: bool,
 ) -> Result<()> {
     let policy = match policy_arg {
@@ -83,12 +94,12 @@ fn run_fan_policy<M: GpuManager>(
         FanPolicyArg::Manual => FanPolicy::Manual,
     };
 
-    let indices = select_gpu_indices(manager, selector)?;
     let mut output = OutputWriter::new(format);
     let mut targets = Vec::new();
 
-    for idx in indices {
-        let device = manager.device_by_index(idx)?;
+    for gpu_uuid in target_uuids {
+        let device = manager.device_by_uuid(gpu_uuid)?;
+        let idx = device.index();
         let info = device.info()?;
         let fan_count = device.fan_count()?;
         if fan_count == 0 {
@@ -142,17 +153,17 @@ fn run_fan_speed<M: GpuManager>(
     speed: u8,
     fan_index: Option<u32>,
     format: OutputFormat,
-    selector: &GpuSelector,
+    target_uuids: &[String],
     dry_run: bool,
 ) -> Result<()> {
     let fan_speed = FanSpeed::new(speed)?;
 
-    let indices = select_gpu_indices(manager, selector)?;
     let mut output = OutputWriter::new(format);
     let mut targets = Vec::new();
 
-    for idx in indices {
-        let device = manager.device_by_index(idx)?;
+    for gpu_uuid in target_uuids {
+        let device = manager.device_by_uuid(gpu_uuid)?;
+        let idx = device.index();
         let info = device.info()?;
         let fan_count = device.fan_count()?;
         if fan_count == 0 {
@@ -323,7 +334,7 @@ mod tests {
         let manager = FailingUuidLookupManager {
             inner: MockManager::new(2),
             uuid_lookups: AtomicUsize::new(0),
-            fail_on_lookup: 2,
+            fail_on_lookup: 4,
         };
 
         assert!(run_fan_speed(
@@ -331,7 +342,7 @@ mod tests {
             80,
             None,
             OutputFormat::Compact,
-            &GpuSelector::All,
+            &["GPU-MOCK-0000".to_string(), "GPU-MOCK-0001".to_string()],
             false,
         )
         .is_err());

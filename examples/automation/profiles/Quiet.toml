@@ -1,0 +1,7 @@
+name = "Quiet"
+description = "Lower-power fallback for an RTX 5080"
+is_default = true
+
+[gpu_settings.default]
+power_limit = 300000
+apply_power_limit = true

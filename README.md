@@ -14,11 +14,13 @@ A fast, safe NVIDIA GPU control tool written in Rust. Manage fan speeds, power l
 - **Acoustic Limiting** - GPU temperature targets for noise control
 - **Health Monitoring** - Comprehensive GPU health scoring with issue detection
 - **Process Monitoring** - List GPU processes with memory usage and filtering
+- **Workload Automation** - Switch saved profiles when games, renderers, or CUDA jobs appear
 - **Alert System** - Configurable alerts for temperature, power, and hardware issues
 - **Advanced Metrics** - ECC errors, PCIe bandwidth, memory temperature, video encoder/decoder
 - **Multi-GPU Support** - Target by index, name, or UUID
 - **Multiple Output Formats** - Table, JSON, and compact output
 - **Dry-Run Mode** - Preview changes before applying
+- **Transactional Profiles** - Validate every GPU first and restore the original state on exit or failure
 - **Daemon Mode** - Continuous control loop with custom fan curves
 - **Configuration Files** - TOML-based persistent configuration
 
@@ -278,6 +280,60 @@ Process types:
 - **Compute** - CUDA/OpenCL compute tasks
 - **Graphics+Compute** - Hybrid workloads
 
+### Workload-Aware Profiles
+
+The CLI uses the same profile files as the GUI in
+`~/.config/nvctl/profiles`. Profiles can contain GPU-specific settings keyed by
+UUID and/or a `default` entry. List and inspect them with:
+
+```bash
+nvctl profile list
+nvctl profile show Performance
+```
+
+Run one profile in the foreground. Fan curves continue to update while the
+process runs, and the power limit, acoustic target, fan policies, and manual fan
+speeds captured at startup are restored on Ctrl-C or any error:
+
+```bash
+# Preview one full apply/restore cycle without changing the GPU
+nvctl --dry-run profile run Performance --single-use
+
+# Keep the profile active until Ctrl-C
+sudo nvctl profile run Performance
+```
+
+Workload automation evaluates case-insensitive process globs reported by NVML.
+The highest-priority matching rule wins; configuration order breaks priority
+ties. Minimum-match durations, release delay, and transition cooldown prevent
+rapid switching:
+
+```bash
+# Explain the current decision without applying anything
+nvctl auto explain
+
+# Test one decision and restoration cycle
+nvctl --dry-run auto run --single-use --force
+
+# Run until Ctrl-C (requires automation.enabled = true)
+sudo nvctl auto run
+
+# Inspect a running process or its last decision
+nvctl auto status
+```
+
+Only one automation process can run at a time. Mutating CLI commands also take
+per-GPU ownership locks, so profile sessions, automation, the control loop, and
+one-shot fan/power/thermal writes cannot race on the same GPU. `auto status`
+keeps an explicit restoration error visible if the original GPU state could not
+be restored. Automation runs in the foreground so a service manager such as
+systemd can supervise it. See
+[`examples/automation/nvctl.toml`](examples/automation/nvctl.toml) for a complete
+RTX 5080 example with `Quiet` and `Performance` power profiles. Profile power
+values are stored in milliwatts because that is NVML's native unit; `300000`
+means 300 W. Check your own supported range with `nvctl power status` before
+changing those values.
+
 ### Alert System
 
 Monitor GPU metrics with configurable alerts:
@@ -408,6 +464,21 @@ limit_watts = 300
 
 [thermal]
 acoustic_limit = 83
+
+[automation]
+enabled = false
+interval_seconds = 2
+cooldown_seconds = 10
+release_delay_seconds = 5
+fallback_profile = "Quiet"
+
+[[automation.rules]]
+name = "games"
+profile = "Performance"
+processes = ["steam_app_*", "*game*"]
+process_type = "graphics"
+priority = 100
+min_duration_seconds = 3
 ```
 
 Use with:

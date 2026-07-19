@@ -4,10 +4,11 @@
 
 use crate::cli::args::{OutputFormat, ThermalArgs, ThermalCommands};
 use crate::cli::output::{AcousticStatus, Message, OutputWriter};
-use crate::commands::selection::{select_gpu_indices, GpuSelector};
+use crate::commands::selection::{resolve_gpu_uuids, select_gpu_indices, GpuSelector};
 use crate::domain::Temperature;
 use crate::error::{DomainError, NvmlError, Result};
 use crate::nvml::{GpuDevice, GpuManager, NvmlManager};
+use crate::services::GpuMutationGuard;
 
 /// Execute thermal commands
 pub fn run_thermal(
@@ -21,7 +22,12 @@ pub fn run_thermal(
     match &args.command {
         ThermalCommands::Status => run_thermal_status(&manager, format, selector),
         ThermalCommands::Limit { celsius } => {
-            run_thermal_limit(&manager, *celsius, format, selector, dry_run)
+            let indices = select_gpu_indices(&manager, selector)?;
+            let target_uuids = resolve_gpu_uuids(&manager, &indices)?;
+            let _mutation_guard = (!dry_run)
+                .then(|| GpuMutationGuard::acquire(&target_uuids, "thermal limit"))
+                .transpose()?;
+            run_thermal_limit(&manager, *celsius, format, &target_uuids, dry_run)
         }
     }
 }
@@ -61,18 +67,18 @@ fn run_thermal_limit<M: GpuManager>(
     manager: &M,
     celsius: i32,
     format: OutputFormat,
-    selector: &GpuSelector,
+    target_uuids: &[String],
     dry_run: bool,
 ) -> Result<()> {
     let target = Temperature::new(celsius);
 
-    let indices = select_gpu_indices(manager, selector)?;
     let mut output = OutputWriter::new(format);
-    let mut targets = Vec::with_capacity(indices.len());
+    let mut targets = Vec::with_capacity(target_uuids.len());
 
     // Validate every selected GPU before mutating any of them.
-    for &idx in &indices {
-        let device = manager.device_by_index(idx)?;
+    for uuid in target_uuids {
+        let device = manager.device_by_uuid(uuid)?;
+        let idx = device.index();
         let limits = device.acoustic_limits()?;
         if limits.current.is_none() || limits.min.is_none() || limits.max.is_none() {
             return Err(NvmlError::NotSupported(format!(

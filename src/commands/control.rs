@@ -4,14 +4,15 @@
 
 use crate::cli::args::{ControlArgs, OutputFormat};
 use crate::cli::output::{print_output, Message};
+use crate::commands::runtime::install_shutdown_handler;
 use crate::commands::selection::{select_gpu_indices, GpuSelector};
 use crate::config::{Config, FanConfig};
 use crate::domain::{FanCurve, FanCurvePoint, FanPolicy, FanSpeed, PowerLimit, Temperature};
 use crate::error::{AppError, ConfigError, DomainError, Result};
 use crate::nvml::{GpuDevice, GpuManager, NvmlManager};
+use crate::services::GpuMutationGuard;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -149,6 +150,15 @@ pub fn run_control(
     // Determine which GPUs to control
     let indices = select_gpu_indices(&manager, selector)?;
     let targets = resolve_control_targets(&manager, &indices)?;
+    let target_uuids = targets
+        .iter()
+        .map(|target| target.gpu_uuid.clone())
+        .collect::<Vec<_>>();
+    let _mutation_guard = if dry_run {
+        None
+    } else {
+        Some(GpuMutationGuard::acquire(&target_uuids, "control")?)
+    };
     validate_control_targets(
         &manager,
         &targets,
@@ -156,18 +166,7 @@ pub fn run_control(
         acoustic_limit.as_ref(),
     )?;
 
-    let running = Arc::new(AtomicBool::new(true));
-    if !args.single_use {
-        let running_for_signal = Arc::clone(&running);
-        ctrlc::set_handler(move || running_for_signal.store(false, Ordering::SeqCst)).map_err(
-            |error| {
-                AppError::Io(std::io::Error::other(format!(
-                    "Failed to install shutdown handler: {}",
-                    error
-                )))
-            },
-        )?;
-    }
+    let running = install_shutdown_handler()?;
 
     if verbose {
         log::info!("Starting control loop");
