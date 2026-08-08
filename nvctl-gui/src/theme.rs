@@ -1,6 +1,7 @@
-//! Custom glossy theme and color definitions for nvctl-gui
+//! Midnight aurora theme and color definitions for nvctl-gui.
 //!
-//! Provides a premium glossy glass aesthetic with vibrant colorful accents.
+//! Keeps the original glossy neon character while using a more restrained,
+//! cohesive accent palette for long-running control-panel use.
 
 use iced::theme::{Custom, Palette};
 use iced::Theme;
@@ -14,98 +15,98 @@ pub mod colors {
     // BACKGROUND LAYERS - Deep modern with glass feel
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Deepest background - Rich dark (#08080c)
-    pub const BG_BASE: Color = Color::from_rgb(0.03, 0.03, 0.05);
+    /// Deepest background - midnight blue-black (#06090f)
+    pub const BG_BASE: Color = Color::from_rgb(0.024, 0.035, 0.059);
 
-    /// Card/panel background - Glass base with blue tint (#0f1018)
-    pub const BG_SURFACE: Color = Color::from_rgb(0.06, 0.063, 0.094);
+    /// Card/panel background - cool glass base (#0c1220)
+    pub const BG_SURFACE: Color = Color::from_rgb(0.047, 0.071, 0.125);
 
-    /// Elevated elements - Glossy elevated (#181824)
-    pub const BG_ELEVATED: Color = Color::from_rgb(0.094, 0.094, 0.14);
+    /// Elevated elements - blue-slate lift (#151d2e)
+    pub const BG_ELEVATED: Color = Color::from_rgb(0.082, 0.114, 0.18);
 
-    /// Overlay/hover - Glass hover (#22223a)
-    pub const BG_OVERLAY: Color = Color::from_rgb(0.133, 0.133, 0.227);
+    /// Overlay/hover - focused indigo (#1f2940)
+    pub const BG_OVERLAY: Color = Color::from_rgb(0.12, 0.16, 0.25);
 
-    /// Card highlight - For selected/active cards (#2a2a48)
+    /// Card highlight - selected blue-slate (#263554)
     #[allow(dead_code)]
-    pub const BG_HIGHLIGHT: Color = Color::from_rgb(0.165, 0.165, 0.28);
+    pub const BG_HIGHLIGHT: Color = Color::from_rgb(0.15, 0.21, 0.33);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // GLASS EFFECT COLORS - For glossy reflections and highlights
     // ═══════════════════════════════════════════════════════════════════════════
 
     /// Glass highlight - Top edge shine
-    pub const GLASS_HIGHLIGHT: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.08);
+    pub const GLASS_HIGHLIGHT: Color = Color::from_rgba(0.80, 0.91, 1.0, 0.10);
 
     /// Glass shine - Bright reflection spot
-    pub const GLASS_SHINE: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.15);
+    pub const GLASS_SHINE: Color = Color::from_rgba(0.78, 0.91, 1.0, 0.18);
 
     /// Glass gradient top - For glossy gradient
     #[allow(dead_code)]
-    pub const GLASS_TOP: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.05);
+    pub const GLASS_TOP: Color = Color::from_rgba(0.72, 0.86, 1.0, 0.07);
 
     /// Glass border - Subtle luminous border
-    pub const GLASS_BORDER: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.1);
+    pub const GLASS_BORDER: Color = Color::from_rgba(0.34, 0.58, 0.82, 0.32);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // TEXT COLORS - High contrast for readability
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Primary text - Bright white (#f5f5ff)
-    pub const TEXT_PRIMARY: Color = Color::from_rgb(0.96, 0.96, 1.0);
+    /// Primary text - cool white (#edf5ff)
+    pub const TEXT_PRIMARY: Color = Color::from_rgb(0.93, 0.96, 1.0);
 
-    /// Secondary text - Soft lavender (#9999bb)
-    pub const TEXT_SECONDARY: Color = Color::from_rgb(0.60, 0.60, 0.73);
+    /// Secondary text - blue-gray (#9eadcc)
+    pub const TEXT_SECONDARY: Color = Color::from_rgb(0.62, 0.68, 0.80);
 
-    /// Muted/disabled text - Dim purple (#555577)
-    pub const TEXT_MUTED: Color = Color::from_rgb(0.33, 0.33, 0.47);
+    /// Muted/disabled text - readable slate (#63758f)
+    pub const TEXT_MUTED: Color = Color::from_rgb(0.39, 0.46, 0.56);
 
-    /// Label text - Very subtle (#444466)
+    /// Label text - subdued slate (#47546b)
     #[allow(dead_code)]
-    pub const TEXT_LABEL: Color = Color::from_rgb(0.27, 0.27, 0.40);
+    pub const TEXT_LABEL: Color = Color::from_rgb(0.28, 0.33, 0.42);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // VIBRANT ACCENT COLORS - Bold, colorful, and glossy
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Primary accent - Brilliant Cyan (#00d4ff)
-    pub const ACCENT_CYAN: Color = Color::from_rgb(0.0, 0.83, 1.0);
+    /// Primary accent - arctic cyan (#2ec5ff)
+    pub const ACCENT_CYAN: Color = Color::from_rgb(0.18, 0.77, 1.0);
 
-    /// Cyan glow variant - Lighter for glossy shine
-    pub const ACCENT_CYAN_BRIGHT: Color = Color::from_rgb(0.5, 0.92, 1.0);
+    /// Cyan glow variant - focused highlight
+    pub const ACCENT_CYAN_BRIGHT: Color = Color::from_rgb(0.55, 0.90, 1.0);
 
-    /// Cyan dim - For backgrounds and subtle effects
-    pub const ACCENT_CYAN_DIM: Color = Color::from_rgb(0.0, 0.35, 0.45);
+    /// Cyan dim - selected backgrounds and subtle effects
+    pub const ACCENT_CYAN_DIM: Color = Color::from_rgb(0.04, 0.27, 0.40);
 
-    /// Success/positive - Vibrant Mint (#00ffa3)
-    pub const ACCENT_GREEN: Color = Color::from_rgb(0.0, 1.0, 0.64);
+    /// Success/positive - vivid mint (#33ea9e)
+    pub const ACCENT_GREEN: Color = Color::from_rgb(0.20, 0.92, 0.62);
 
     /// Green bright - For glossy highlights
-    pub const ACCENT_GREEN_BRIGHT: Color = Color::from_rgb(0.55, 1.0, 0.8);
+    pub const ACCENT_GREEN_BRIGHT: Color = Color::from_rgb(0.55, 1.0, 0.80);
 
     /// Green dim - For backgrounds
-    pub const ACCENT_GREEN_DIM: Color = Color::from_rgb(0.0, 0.45, 0.28);
+    pub const ACCENT_GREEN_DIM: Color = Color::from_rgb(0.04, 0.32, 0.22);
 
-    /// Warning - Vibrant Amber (#ffaa00)
-    pub const ACCENT_ORANGE: Color = Color::from_rgb(1.0, 0.667, 0.0);
+    /// Warning - warm amber (#ffb454)
+    pub const ACCENT_ORANGE: Color = Color::from_rgb(1.0, 0.706, 0.33);
 
     /// Orange bright - For glossy highlights
     pub const ACCENT_ORANGE_BRIGHT: Color = Color::from_rgb(1.0, 0.82, 0.45);
 
     /// Orange dim - For backgrounds
-    pub const ACCENT_ORANGE_DIM: Color = Color::from_rgb(0.45, 0.27, 0.0);
+    pub const ACCENT_ORANGE_DIM: Color = Color::from_rgb(0.35, 0.20, 0.02);
 
-    /// Error/critical - Hot Pink Red (#ff2d55)
-    pub const ACCENT_RED: Color = Color::from_rgb(1.0, 0.176, 0.333);
+    /// Error/critical - coral red (#ff5c7a)
+    pub const ACCENT_RED: Color = Color::from_rgb(1.0, 0.36, 0.48);
 
     /// Red bright - For glossy highlights
-    pub const ACCENT_RED_BRIGHT: Color = Color::from_rgb(1.0, 0.55, 0.65);
+    pub const ACCENT_RED_BRIGHT: Color = Color::from_rgb(1.0, 0.60, 0.68);
 
     /// Red dim - For backgrounds
-    pub const ACCENT_RED_DIM: Color = Color::from_rgb(0.45, 0.08, 0.15);
+    pub const ACCENT_RED_DIM: Color = Color::from_rgb(0.36, 0.05, 0.13);
 
-    /// Alternative accent - Electric Magenta (#ff00aa)
-    pub const ACCENT_MAGENTA: Color = Color::from_rgb(1.0, 0.0, 0.667);
+    /// Alternative accent - orchid (#d98cff)
+    pub const ACCENT_MAGENTA: Color = Color::from_rgb(0.85, 0.55, 1.0);
 
     /// Magenta bright - For glossy effects
     #[allow(dead_code)]
@@ -115,25 +116,27 @@ pub mod colors {
     #[allow(dead_code)]
     pub const ACCENT_MAGENTA_DIM: Color = Color::from_rgb(0.45, 0.0, 0.3);
 
-    /// Alternative accent - Royal Purple (#9966ff)
-    pub const ACCENT_PURPLE: Color = Color::from_rgb(0.6, 0.4, 1.0);
+    /// Alternative accent - periwinkle (#9d8cff)
+    pub const ACCENT_PURPLE: Color = Color::from_rgb(0.62, 0.55, 1.0);
 
     /// Purple bright - For glossy effects
     #[allow(dead_code)]
     pub const ACCENT_PURPLE_BRIGHT: Color = Color::from_rgb(0.75, 0.6, 1.0);
 
-    /// Yellow-green transitional color - Lime (#77ff00)
-    pub const ACCENT_LIME: Color = Color::from_rgb(0.467, 1.0, 0.0);
+    /// Yellow-green transitional color - soft lime (#b8ef65)
+    pub const ACCENT_LIME: Color = Color::from_rgb(0.72, 0.94, 0.40);
 
     /// Lime bright - For glossy effects
     #[allow(dead_code)]
     pub const ACCENT_LIME_BRIGHT: Color = Color::from_rgb(0.7, 1.0, 0.45);
 
-    /// Sky blue - Additional colorful accent (#00aaff)
-    pub const ACCENT_SKY: Color = Color::from_rgb(0.0, 0.667, 1.0);
+    /// Sky blue - Additional colorful accent (#33b6ff)
+    #[allow(dead_code)]
+    pub const ACCENT_SKY: Color = Color::from_rgb(0.20, 0.71, 1.0);
 
-    /// Electric Blue - Deep vibrant blue (#0088ff)
-    pub const ACCENT_BLUE: Color = Color::from_rgb(0.0, 0.533, 1.0);
+    /// Electric Blue - Deep vibrant blue (#3d8bff)
+    #[allow(dead_code)]
+    pub const ACCENT_BLUE: Color = Color::from_rgb(0.24, 0.55, 1.0);
 
     /// Gold accent - Premium feel (#ffd700)
     #[allow(dead_code)]
@@ -301,7 +304,7 @@ pub mod colors {
 /// Create the custom nvctl dark theme
 pub fn nvctl_theme() -> Theme {
     Theme::Custom(Arc::new(Custom::new(
-        "nvctl-neon".to_string(),
+        "nvctl-midnight-aurora".to_string(),
         Palette {
             background: colors::BG_BASE,
             text: colors::TEXT_PRIMARY,

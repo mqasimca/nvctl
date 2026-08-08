@@ -7,7 +7,9 @@ use crate::state::{AppState, GpuState};
 use crate::theme::{colors, font_size, spacing};
 use crate::widgets::PowerBar;
 
-use iced::widget::{button, column, container, horizontal_space, row, slider, text, Canvas};
+use iced::widget::{
+    button, column, container, horizontal_space, row, scrollable, slider, text, Canvas,
+};
 use iced::{Alignment, Element, Length, Theme};
 use nvctl::domain::PowerLimit;
 
@@ -23,12 +25,14 @@ pub fn view_power_control(state: &AppState) -> Element<'_, Message> {
         view_no_gpu()
     };
 
-    column![header, content]
-        .spacing(spacing::LG)
-        .padding(spacing::LG)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    scrollable(
+        column![header, content]
+            .spacing(spacing::LG)
+            .padding(spacing::LG)
+            .width(Length::Fill),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 /// Power control header
@@ -209,16 +213,39 @@ fn view_power_slider<'a>(state: &'a AppState, gpu: &'a GpuState) -> Element<'a, 
     .align_y(Alignment::Center)
     .spacing(spacing::MD);
 
+    let has_pending_change = state
+        .pending_power_limit
+        .is_some_and(|limit| limit != gpu.power_limit);
     let current_display = row![
-        text("Current Limit:")
-            .size(font_size::BASE)
-            .color(colors::TEXT_SECONDARY),
+        text(if has_pending_change {
+            "Proposed Limit:"
+        } else {
+            "Current Limit:"
+        })
+        .size(font_size::BASE)
+        .color(colors::TEXT_SECONDARY),
         horizontal_space(),
         text(format!("{}W", current_watts))
             .size(font_size::XL)
             .color(colors::ACCENT_CYAN),
     ]
     .align_y(Alignment::Center);
+
+    let change_summary: Element<'_, Message> = if has_pending_change {
+        text(format!(
+            "Pending change: {}W → {}W. The GPU will not change until you apply it.",
+            gpu.power_limit.as_watts(),
+            current_watts
+        ))
+        .size(font_size::SM)
+        .color(colors::ACCENT_ORANGE)
+        .into()
+    } else {
+        text("Move the slider to stage a change, then apply it.")
+            .size(font_size::SM)
+            .color(colors::TEXT_MUTED)
+            .into()
+    };
 
     // Apply button - shows "Apply to All" when in linked mode
     let apply_label = if state.linked_gpus && state.has_multiple_gpus() {
@@ -227,12 +254,7 @@ fn view_power_slider<'a>(state: &'a AppState, gpu: &'a GpuState) -> Element<'a, 
         "Apply".to_string()
     };
 
-    let buttons_row = row![
-        button(text("Reset to Default").size(font_size::SM))
-            .on_press(Message::PowerControl(PowerControlMessage::ResetToDefault))
-            .padding([spacing::SM, spacing::MD])
-            .style(secondary_button_style),
-        horizontal_space(),
+    let apply_button = if has_pending_change {
         button(text(apply_label).size(font_size::BASE))
             .on_press(Message::PowerControl(PowerControlMessage::ApplyLimit))
             .padding([spacing::SM, spacing::MD])
@@ -240,23 +262,45 @@ fn view_power_slider<'a>(state: &'a AppState, gpu: &'a GpuState) -> Element<'a, 
                 linked_apply_button_style
             } else {
                 primary_button_style
-            }),
+            })
+    } else {
+        button(text("Apply").size(font_size::BASE))
+            .padding([spacing::SM, spacing::MD])
+            .style(disabled_button_style)
+    };
+
+    let buttons_row = row![
+        button(text("Reset to Default").size(font_size::SM))
+            .on_press(Message::PowerControl(PowerControlMessage::ResetToDefault))
+            .padding([spacing::SM, spacing::MD])
+            .style(secondary_button_style),
+        horizontal_space(),
+        apply_button,
     ]
     .width(Length::Fill);
 
-    container(column![title, slider_row, current_display, buttons_row].spacing(spacing::MD))
-        .padding(spacing::MD)
-        .width(Length::Fill)
-        .style(|_theme| container::Style {
-            background: Some(colors::BG_SURFACE.into()),
-            border: iced::Border {
-                color: colors::BG_ELEVATED,
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
+    container(
+        column![
+            title,
+            slider_row,
+            current_display,
+            change_summary,
+            buttons_row
+        ]
+        .spacing(spacing::MD),
+    )
+    .padding(spacing::MD)
+    .width(Length::Fill)
+    .style(|_theme| container::Style {
+        background: Some(colors::BG_SURFACE.into()),
+        border: iced::Border {
+            color: colors::BG_ELEVATED,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 /// Power constraints information
@@ -351,6 +395,19 @@ fn secondary_button_style(_theme: &Theme, status: button::Status) -> button::Sty
     button::Style {
         background: Some(bg.into()),
         text_color: colors::TEXT_SECONDARY,
+        border: iced::Border {
+            color: colors::BG_OVERLAY,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn disabled_button_style(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(colors::BG_ELEVATED.into()),
+        text_color: colors::TEXT_MUTED,
         border: iced::Border {
             color: colors::BG_OVERLAY,
             width: 1.0,

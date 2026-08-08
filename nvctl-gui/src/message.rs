@@ -55,6 +55,9 @@ pub enum Message {
     /// Profile messages
     Profile(ProfileMessage),
 
+    /// Application preference messages
+    Settings(SettingsMessage),
+
     // === Actions ===
     /// Apply current settings to GPU
     ApplySettings,
@@ -71,6 +74,12 @@ pub enum Message {
 
     /// Dismiss error/notification
     DismissNotification,
+
+    /// Confirm a previously described hardware-changing action.
+    ConfirmPendingAction,
+
+    /// Cancel a previously described hardware-changing action.
+    CancelPendingAction,
 }
 
 /// Available application views
@@ -307,6 +316,17 @@ pub enum ProfileMessage {
     Refresh,
 }
 
+/// Application preference changes. These are persisted immediately after validation.
+#[derive(Debug, Clone, Copy)]
+pub enum SettingsMessage {
+    /// Change telemetry polling frequency in milliseconds.
+    PollInterval(u64),
+    /// Enable or disable the system tray on the next application launch.
+    TrayEnabled(bool),
+    /// Choose whether the application starts hidden when the tray is available.
+    StartMinimized(bool),
+}
+
 impl From<FanControlMessage> for Message {
     fn from(msg: FanControlMessage) -> Self {
         Message::FanControl(msg)
@@ -322,6 +342,12 @@ impl From<PowerControlMessage> for Message {
 impl From<ProfileMessage> for Message {
     fn from(msg: ProfileMessage) -> Self {
         Message::Profile(msg)
+    }
+}
+
+impl From<SettingsMessage> for Message {
+    fn from(msg: SettingsMessage) -> Self {
+        Message::Settings(msg)
     }
 }
 

@@ -2,18 +2,18 @@
 //!
 //! Implements the Elm Architecture (TEA) pattern for nvctl-gui.
 
-use crate::message::{KeyboardShortcut, Message, View};
+use crate::message::{KeyboardShortcut, Message, SettingsMessage, View};
 use crate::services::{
     start_tray, CurveDaemon, GpuMonitor, GpuSettings, GuiConfig, Profile, ProfileService,
     TrayHandle,
 };
-use crate::state::{AppState, Notification};
+use crate::state::{AppState, Notification, PendingAction};
 use crate::theme::{colors, font_size, nvctl_theme, spacing};
 use crate::views;
 
 use iced::keyboard::{self, key::Named, Key, Modifiers};
 use iced::widget::{button, column, container, horizontal_space, row, text, Column, Space};
-use iced::{Alignment, Element, Length, Subscription, Task, Theme};
+use iced::{alignment, Alignment, Element, Length, Subscription, Task, Theme};
 use nvctl::domain::{FanCurve, FanCurvePoint, FanPolicy, FanSpeed};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -1176,6 +1176,20 @@ impl NvctlGui {
                         )));
                     }
                     FanControlMessage::ApplyCurve => {
+                        let was_confirmed =
+                            self.state.confirmed_action.as_ref() == Some(&PendingAction::FanCurve);
+                        self.state.confirmed_action = None;
+                        if !was_confirmed && self.state.linked_gpus && self.state.gpus.len() > 1 {
+                            self.state.request_confirmation(
+                                PendingAction::FanCurve,
+                                "Apply fan curve to all GPUs",
+                                format!(
+                                    "This will save and enable the selected fan curve on all {} linked GPUs. Automatic fan control may begin immediately.",
+                                    self.state.gpus.len()
+                                ),
+                            );
+                            return Task::none();
+                        }
                         // Apply curve for selected fan
                         let fan_idx = self.state.selected_curve_fan;
                         let enabled = self
@@ -1279,6 +1293,20 @@ impl NvctlGui {
                         }
                     }
                     PowerControlMessage::ApplyLimit => {
+                        let was_confirmed = self.state.confirmed_action.as_ref()
+                            == Some(&PendingAction::PowerLimit);
+                        self.state.confirmed_action = None;
+                        if !was_confirmed && self.state.linked_gpus && self.state.gpus.len() > 1 {
+                            self.state.request_confirmation(
+                                PendingAction::PowerLimit,
+                                "Apply power limit to all GPUs",
+                                format!(
+                                    "This will apply the selected power limit to all {} linked GPUs. Each GPU will be validated before the change is made.",
+                                    self.state.gpus.len()
+                                ),
+                            );
+                            return Task::none();
+                        }
                         // Get current power limit from state
                         let limit = match (self.state.pending_power_limit, self.state.current_gpu())
                         {
@@ -1372,16 +1400,31 @@ impl NvctlGui {
                 use crate::message::ProfileMessage;
 
                 match msg {
-                    ProfileMessage::Selected(name) => match self.apply_profile(&name) {
-                        Ok(()) => self.state.set_notification(Notification::success(format!(
-                            "Profile '{}' applied",
-                            name
-                        ))),
-                        Err(error) => self.state.set_notification(Notification::error(format!(
-                            "Failed to apply profile '{}': {}",
-                            name, error
-                        ))),
-                    },
+                    ProfileMessage::Selected(name) => {
+                        let action = PendingAction::Profile(name.clone());
+                        let was_confirmed = self.state.confirmed_action.as_ref() == Some(&action);
+                        self.state.confirmed_action = None;
+                        if !was_confirmed && self.state.linked_gpus && self.state.gpus.len() > 1 {
+                            self.state.request_confirmation(
+                                action,
+                                "Apply profile to all GPUs",
+                                format!(
+                                    "Profile '{name}' may change power limits and fan controls on all {} linked GPUs.",
+                                    self.state.gpus.len()
+                                ),
+                            );
+                            return Task::none();
+                        }
+                        match self.apply_profile(&name) {
+                            Ok(()) => self.state.set_notification(Notification::success(format!(
+                                "Profile '{}' applied",
+                                name
+                            ))),
+                            Err(error) => self.state.set_notification(Notification::error(
+                                format!("Failed to apply profile '{}': {}", name, error),
+                            )),
+                        }
+                    }
                     ProfileMessage::SaveCurrent(name) => {
                         if self.state.current_gpu().is_none() {
                             self.state.set_notification(Notification::error(
@@ -1579,6 +1622,65 @@ impl NvctlGui {
                         }
                     },
                 }
+                Task::none()
+            }
+
+            // Preferences
+            Message::Settings(msg) => {
+                let mut next_config = self.config.clone();
+                let message = match msg {
+                    SettingsMessage::PollInterval(interval) => {
+                        next_config.preferences.poll_interval_ms = interval;
+                        format!("Telemetry update rate set to {} ms", interval)
+                    }
+                    SettingsMessage::TrayEnabled(enabled) => {
+                        next_config.preferences.enable_tray = enabled;
+                        format!(
+                            "System tray will be {} after restarting nvctl",
+                            if enabled { "enabled" } else { "disabled" }
+                        )
+                    }
+                    SettingsMessage::StartMinimized(enabled) => {
+                        next_config.preferences.start_minimized = enabled;
+                        format!(
+                            "Start minimized is {}",
+                            if enabled { "enabled" } else { "disabled" }
+                        )
+                    }
+                };
+                match self.save_gui_config_candidate(&next_config) {
+                    Ok(()) => {
+                        self.config = next_config;
+                        self.state.set_notification(Notification::success(message));
+                    }
+                    Err(error) => self.state.set_notification(Notification::error(format!(
+                        "Could not save preference: {}",
+                        error
+                    ))),
+                }
+                Task::none()
+            }
+
+            Message::ConfirmPendingAction => {
+                let Some(confirmation) = self.state.take_pending_confirmation() else {
+                    return Task::none();
+                };
+                self.state.confirmed_action = Some(confirmation.action.clone());
+                match confirmation.action {
+                    PendingAction::PowerLimit => self.update(Message::PowerControl(
+                        crate::message::PowerControlMessage::ApplyLimit,
+                    )),
+                    PendingAction::FanCurve => self.update(Message::FanControl(
+                        crate::message::FanControlMessage::ApplyCurve,
+                    )),
+                    PendingAction::Profile(name) => self.update(Message::Profile(
+                        crate::message::ProfileMessage::Selected(name),
+                    )),
+                }
+            }
+
+            Message::CancelPendingAction => {
+                self.state.cancel_pending_confirmation();
                 Task::none()
             }
 
@@ -1920,15 +2022,32 @@ impl NvctlGui {
 
         let main_layout = row![sidebar, content].height(Length::Fill);
 
-        // Add notification if present
-        let with_notification = if let Some(ref notif) = self.state.notification {
-            let notification = self.view_notification(notif);
-            column![main_layout, notification]
-        } else {
-            column![main_layout]
-        };
+        // Feedback and confirmations are overlays so they never move a page's
+        // controls out from under the pointer.
+        let with_notification: Element<'_, Message> =
+            if let Some(ref notif) = self.state.notification {
+                iced::widget::stack![
+                    main_layout,
+                    container(self.view_notification(notif))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(spacing::LG)
+                        .align_x(alignment::Horizontal::Right)
+                        .align_y(alignment::Vertical::Top),
+                ]
+                .into()
+            } else {
+                main_layout.into()
+            };
 
-        container(with_notification)
+        let with_confirmation: Element<'_, Message> =
+            if let Some(ref confirmation) = self.state.pending_confirmation {
+                iced::widget::stack![with_notification, self.view_confirmation(confirmation)].into()
+            } else {
+                with_notification
+            };
+
+        container(with_confirmation)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_theme| container::Style {
@@ -1948,10 +2067,10 @@ impl NvctlGui {
 
         let nav_items = [
             (View::Dashboard, "Dashboard", colors::ACCENT_CYAN),
-            (View::FanControl, "Fan Control", colors::ACCENT_PURPLE),
-            (View::PowerControl, "Power", colors::ACCENT_GREEN),
-            (View::ThermalControl, "Thermal", colors::ACCENT_ORANGE),
-            (View::Profiles, "Profiles", colors::ACCENT_MAGENTA),
+            (View::FanControl, "Fan Control", colors::ACCENT_CYAN),
+            (View::PowerControl, "Power", colors::ACCENT_CYAN),
+            (View::ThermalControl, "Thermal", colors::ACCENT_CYAN),
+            (View::Profiles, "Profiles", colors::ACCENT_CYAN),
         ];
 
         let nav_buttons: Vec<Element<'_, Message>> = nav_items
@@ -1961,9 +2080,41 @@ impl NvctlGui {
 
         let nav_column = Column::with_children(nav_buttons).spacing(spacing::SM);
 
-        let settings_button = self.view_nav_button(View::Settings, "Settings", colors::ACCENT_SKY);
+        let sidebar_toggle = button(
+            text(if self.state.sidebar_expanded {
+                "‹ Collapse"
+            } else {
+                "›"
+            })
+            .size(font_size::SM),
+        )
+        .on_press(Message::SidebarToggled)
+        .padding([spacing::XS, spacing::SM])
+        .width(Length::Fill);
+
+        let settings_button = self.view_nav_button(View::Settings, "Settings", colors::ACCENT_CYAN);
+
+        let brand: Element<'_, Message> = if self.state.sidebar_expanded {
+            column![
+                text("NVCTL")
+                    .size(font_size::XL)
+                    .color(colors::TEXT_PRIMARY),
+                text("GPU CONTROL")
+                    .size(font_size::XS)
+                    .color(colors::TEXT_MUTED),
+            ]
+            .spacing(spacing::XS)
+            .into()
+        } else {
+            text("N")
+                .size(font_size::XL)
+                .color(colors::ACCENT_CYAN)
+                .into()
+        };
 
         let content = column![
+            brand,
+            sidebar_toggle,
             nav_column,
             Space::with_height(Length::Fill),
             settings_button,
@@ -1987,7 +2138,7 @@ impl NvctlGui {
             .into()
     }
 
-    /// Render a colorful glossy navigation button
+    /// Render a compact navigation button with one consistent active state.
     fn view_nav_button<'a>(
         &'a self,
         view: View,
@@ -1999,18 +2150,14 @@ impl NvctlGui {
         let style = move |_theme: &Theme, status: button::Status| {
             if is_active {
                 button::Style {
-                    background: Some(colors::with_alpha(accent, 0.15).into()),
+                    background: Some(colors::ACCENT_CYAN_DIM.into()),
                     text_color: accent,
                     border: iced::Border {
-                        color: colors::with_alpha(accent, 0.4),
+                        color: colors::with_alpha(accent, 0.55),
                         width: 1.0,
-                        radius: 12.0.into(),
+                        radius: 6.0.into(),
                     },
-                    shadow: iced::Shadow {
-                        color: colors::with_alpha(accent, 0.1),
-                        offset: iced::Vector::new(0.0, 2.0),
-                        blur_radius: 8.0,
-                    },
+                    ..Default::default()
                 }
             } else {
                 let bg = match status {
@@ -2027,7 +2174,7 @@ impl NvctlGui {
                     border: iced::Border {
                         color: colors::with_alpha(accent, 0.0),
                         width: 0.0,
-                        radius: 12.0.into(),
+                        radius: 6.0.into(),
                     },
                     ..Default::default()
                 }
@@ -2037,8 +2184,17 @@ impl NvctlGui {
         let label_text: Element<'_, Message> = if self.state.sidebar_expanded {
             text(label).size(font_size::BASE).into()
         } else {
-            // Just show first letter when collapsed
-            text(&label[..1]).size(font_size::LG).into()
+            // Two-letter abbreviations remain distinguishable (Power/Profiles
+            // would otherwise both be rendered as "P").
+            let abbreviation = match view {
+                View::Dashboard => "DB",
+                View::FanControl => "FN",
+                View::PowerControl => "PW",
+                View::ThermalControl => "TH",
+                View::Profiles => "PR",
+                View::Settings => "ST",
+            };
+            text(abbreviation).size(font_size::SM).into()
         };
 
         button(label_text)
@@ -2108,6 +2264,7 @@ impl NvctlGui {
         container(content)
             .padding(spacing::MD)
             .width(Length::Fill)
+            .max_width(460.0)
             .style(move |_theme| container::Style {
                 background: Some(colors::BG_SURFACE.into()),
                 border: iced::Border {
@@ -2123,6 +2280,67 @@ impl NvctlGui {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// Render an explicit confirmation for actions that change several GPUs.
+    fn view_confirmation<'a>(
+        &'a self,
+        confirmation: &'a crate::state::Confirmation,
+    ) -> Element<'a, Message> {
+        let dialog = container(
+            column![
+                text(&confirmation.title)
+                    .size(font_size::XL)
+                    .color(colors::TEXT_PRIMARY),
+                text(&confirmation.description)
+                    .size(font_size::BASE)
+                    .color(colors::TEXT_SECONDARY),
+                row![
+                    button(text("Cancel").size(font_size::BASE))
+                        .on_press(Message::CancelPendingAction)
+                        .padding([spacing::SM, spacing::MD]),
+                    horizontal_space(),
+                    button(text("Apply to all GPUs").size(font_size::BASE))
+                        .on_press(Message::ConfirmPendingAction)
+                        .padding([spacing::SM, spacing::MD]),
+                ]
+                .align_y(Alignment::Center)
+                .spacing(spacing::MD),
+            ]
+            .spacing(spacing::LG),
+        )
+        .padding(spacing::LG)
+        .width(Length::Fill)
+        .max_width(480.0)
+        .style(|_theme| container::Style {
+            background: Some(colors::BG_SURFACE.into()),
+            border: iced::Border {
+                color: colors::with_alpha(colors::ACCENT_ORANGE, 0.7),
+                width: 1.5,
+                radius: 12.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: colors::with_alpha(colors::BG_BASE, 0.8),
+                offset: iced::Vector::new(0.0, 8.0),
+                blur_radius: 28.0,
+            },
+            ..Default::default()
+        });
+
+        container(
+            container(dialog)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .align_y(alignment::Vertical::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_theme| container::Style {
+            background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+            ..Default::default()
+        })
+        .into()
     }
 
     /// Get theme

@@ -2,12 +2,12 @@
 //!
 //! Application settings and configuration.
 
-use crate::message::Message;
+use crate::message::{Message, SettingsMessage};
 use crate::services::GuiConfig;
-use crate::state::AppState;
+use crate::state::{AppState, NotificationLevel};
 use crate::theme::{colors, font_size, spacing};
 
-use iced::widget::{column, container, horizontal_space, row, scrollable, text};
+use iced::widget::{column, container, horizontal_space, row, scrollable, slider, text, toggler};
 use iced::{Alignment, Element, Length};
 
 /// Render the settings view
@@ -15,15 +15,145 @@ pub fn view_settings<'a>(state: &'a AppState, config: &'a GuiConfig) -> Element<
     let header = view_header();
     let about = view_about();
     let keyboard_shortcuts = view_keyboard_shortcuts();
+    let preferences = view_preferences(config);
+    let activity = view_recent_activity(state);
     let gpu_list = view_gpu_list(state);
     let app_info = view_app_info(config.preferences.poll_interval_ms);
 
-    let content = column![header, about, keyboard_shortcuts, gpu_list, app_info]
-        .spacing(spacing::LG)
-        .padding(spacing::LG)
-        .width(Length::Fill);
+    let content = column![
+        header,
+        about,
+        preferences,
+        activity,
+        keyboard_shortcuts,
+        gpu_list,
+        app_info
+    ]
+    .spacing(spacing::LG)
+    .padding(spacing::LG)
+    .width(Length::Fill);
 
     scrollable(content).height(Length::Fill).into()
+}
+
+/// Recent control feedback remains available after a transient toast closes.
+fn view_recent_activity(state: &AppState) -> Element<'_, Message> {
+    let title = text("Recent Activity")
+        .size(font_size::LG)
+        .color(colors::TEXT_PRIMARY);
+
+    let entries: Vec<Element<'_, Message>> = if state.notification_history.is_empty() {
+        vec![text("No control actions or alerts in this session.")
+            .size(font_size::SM)
+            .color(colors::TEXT_MUTED)
+            .into()]
+    } else {
+        state
+            .notification_history
+            .iter()
+            .rev()
+            .take(8)
+            .map(|notification| {
+                let (label, color) = match notification.level {
+                    NotificationLevel::Success => ("Success", colors::ACCENT_GREEN),
+                    NotificationLevel::Warning => ("Warning", colors::ACCENT_ORANGE),
+                    NotificationLevel::Error => ("Error", colors::ACCENT_RED),
+                };
+                row![
+                    text(label).size(font_size::XS).color(color),
+                    text(&notification.message)
+                        .size(font_size::SM)
+                        .color(colors::TEXT_SECONDARY),
+                ]
+                .spacing(spacing::SM)
+                .into()
+            })
+            .collect()
+    };
+
+    container(
+        column![
+            title,
+            iced::widget::Column::with_children(entries).spacing(spacing::XS)
+        ]
+        .spacing(spacing::MD),
+    )
+    .padding(spacing::MD)
+    .width(Length::Fill)
+    .style(|_theme| container::Style {
+        background: Some(colors::BG_SURFACE.into()),
+        border: iced::Border {
+            color: colors::BG_ELEVATED,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Preferences that affect the local application. Values save as they change.
+fn view_preferences(config: &GuiConfig) -> Element<'_, Message> {
+    let title = text("Application Preferences")
+        .size(font_size::LG)
+        .color(colors::TEXT_PRIMARY);
+
+    let poll_interval = config.preferences.poll_interval_ms.clamp(250, 5_000);
+    let poll_control = column![
+        row![
+            text("Telemetry update rate")
+                .size(font_size::BASE)
+                .color(colors::TEXT_SECONDARY),
+            horizontal_space(),
+            text(format!("{} ms", poll_interval))
+                .size(font_size::BASE)
+                .color(colors::ACCENT_CYAN),
+        ]
+        .align_y(Alignment::Center),
+        slider(250..=5_000, poll_interval as i32, |value| {
+            Message::Settings(SettingsMessage::PollInterval(value as u64))
+        })
+        .step(250)
+        .width(Length::Fill),
+        text("Lower intervals refresh more often and use more system resources.")
+            .size(font_size::SM)
+            .color(colors::TEXT_MUTED),
+    ]
+    .spacing(spacing::SM);
+
+    let tray = toggler(config.preferences.enable_tray)
+        .label("Enable system tray")
+        .on_toggle(|enabled| Message::Settings(SettingsMessage::TrayEnabled(enabled)))
+        .size(20.0);
+    let start_minimized = toggler(config.preferences.start_minimized)
+        .label("Start minimized to tray")
+        .on_toggle(|enabled| Message::Settings(SettingsMessage::StartMinimized(enabled)))
+        .size(20.0);
+
+    container(
+        column![
+            title,
+            poll_control,
+            tray,
+            start_minimized,
+            text("Tray changes take effect after restarting nvctl.")
+                .size(font_size::SM)
+                .color(colors::TEXT_MUTED),
+        ]
+        .spacing(spacing::MD),
+    )
+    .padding(spacing::MD)
+    .width(Length::Fill)
+    .style(|_theme| container::Style {
+        background: Some(colors::BG_SURFACE.into()),
+        border: iced::Border {
+            color: colors::BG_ELEVATED,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 /// Settings header

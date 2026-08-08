@@ -159,19 +159,14 @@ fn view_multi_gpu_summary(
     .spacing(spacing::XL);
 
     container(column![title, gpu_count, link_status, stats].spacing(spacing::SM))
-        .padding(spacing::LG)
+        .padding(spacing::MD)
         .width(Length::Fill)
         .style(|_theme| container::Style {
             background: Some(colors::BG_SURFACE.into()),
             border: iced::Border {
-                color: colors::with_alpha(colors::ACCENT_CYAN, 0.5),
-                width: 1.5,
-                radius: 16.0.into(),
-            },
-            shadow: iced::Shadow {
-                color: colors::with_alpha(colors::ACCENT_CYAN, 0.1),
-                offset: iced::Vector::new(0.0, 4.0),
-                blur_radius: 20.0,
+                color: colors::GLASS_BORDER,
+                width: 1.0,
+                radius: 8.0.into(),
             },
             ..Default::default()
         })
@@ -350,7 +345,7 @@ fn view_gpu_dashboard<'a>(_state: &'a AppState, gpu: &'a GpuState) -> Element<'a
         .into()
 }
 
-/// VRAM usage bar with glossy styling
+/// VRAM usage bar
 fn view_vram_bar(gpu: &GpuState) -> Element<'_, Message> {
     let vram_widget = VramBar::new(gpu.memory_info);
     let vram_canvas: Element<'_, Message> = Canvas::new(vram_widget)
@@ -374,12 +369,7 @@ fn view_vram_bar(gpu: &GpuState) -> Element<'_, Message> {
             border: iced::Border {
                 color: colors::with_alpha(vram_color, 0.2),
                 width: 1.0,
-                radius: 16.0.into(),
-            },
-            shadow: iced::Shadow {
-                color: colors::with_alpha(vram_color, 0.05),
-                offset: iced::Vector::new(0.0, 4.0),
-                blur_radius: 16.0,
+                radius: 8.0.into(),
             },
             ..Default::default()
         })
@@ -397,13 +387,8 @@ fn view_temp_history(gpu: &GpuState) -> Element<'_, Message> {
     )
     .range(0.0, 100.0);
 
-    let util_series = DataSeries::new(
-        gpu.gpu_util_history.data(),
-        "GPU",
-        "%",
-        colors::ACCENT_PURPLE,
-    )
-    .range(0.0, 100.0);
+    let util_series = DataSeries::new(gpu.gpu_util_history.data(), "GPU", "%", colors::ACCENT_CYAN)
+        .range(0.0, 100.0);
 
     // Normalize power to percentage of limit for better visualization
     let power_max = gpu.power_limit.as_watts().max(1) as f32;
@@ -433,12 +418,7 @@ fn view_temp_history(gpu: &GpuState) -> Element<'_, Message> {
             border: iced::Border {
                 color: colors::with_alpha(colors::ACCENT_CYAN, 0.2),
                 width: 1.0,
-                radius: 16.0.into(),
-            },
-            shadow: iced::Shadow {
-                color: colors::with_alpha(colors::ACCENT_CYAN, 0.05),
-                offset: iced::Vector::new(0.0, 4.0),
-                blur_radius: 16.0,
+                radius: 8.0.into(),
             },
             ..Default::default()
         })
@@ -472,11 +452,11 @@ fn view_gpu_card(gpu: &GpuState) -> Element<'_, Message> {
     // Clock speeds display
     let gpu_clock = text(format!("GPU: {} MHz", gpu.gpu_clock.as_mhz()))
         .size(font_size::SM)
-        .color(colors::ACCENT_PURPLE);
+        .color(colors::TEXT_SECONDARY);
 
     let mem_clock = text(format!("MEM: {} MHz", gpu.mem_clock.as_mhz()))
         .size(font_size::SM)
-        .color(colors::ACCENT_BLUE);
+        .color(colors::TEXT_SECONDARY);
 
     let perf_state = text(format!("{}", gpu.perf_state))
         .size(font_size::SM)
@@ -491,19 +471,14 @@ fn view_gpu_card(gpu: &GpuState) -> Element<'_, Message> {
         .width(Length::Fill);
 
     container(content_row)
-        .padding(spacing::LG)
+        .padding(spacing::MD)
         .width(Length::Fill)
         .style(|_theme| container::Style {
             background: Some(colors::BG_SURFACE.into()),
             border: iced::Border {
                 color: colors::GLASS_BORDER,
                 width: 1.0,
-                radius: 16.0.into(),
-            },
-            shadow: iced::Shadow {
-                color: colors::with_alpha(colors::ACCENT_PURPLE, 0.08),
-                offset: iced::Vector::new(0.0, 4.0),
-                blur_radius: 16.0,
+                radius: 8.0.into(),
             },
             ..Default::default()
         })
@@ -546,18 +521,23 @@ fn view_metrics_row(gpu: &GpuState) -> Element<'_, Message> {
         .width(Length::Fixed(160.0))
         .height(Length::Fixed(160.0))
         .into();
-    let util_color = colors::ACCENT_PURPLE;
+    let util_color = colors::ACCENT_CYAN;
     let util_gauge = view_metric_card("GPU USAGE", util_canvas, util_color);
 
     // Primary metrics row
-    let primary_row = row![temp_gauge, fan_gauge, power_gauge, util_gauge]
+    // Two columns keep the dashboard usable beside an expanded sidebar and
+    // avoid horizontal clipping on laptop-sized windows.
+    let primary_top = row![temp_gauge, fan_gauge]
+        .spacing(spacing::LG)
+        .width(Length::Fill);
+    let primary_bottom = row![power_gauge, util_gauge]
         .spacing(spacing::LG)
         .width(Length::Fill);
 
     // Phase 1 metrics row
     let phase1_row = view_phase1_metrics(gpu);
 
-    column![primary_row, phase1_row]
+    column![primary_top, primary_bottom, phase1_row]
         .spacing(spacing::XL)
         .width(Length::Fill)
         .into()
@@ -627,16 +607,23 @@ fn view_phase1_metrics(gpu: &GpuState) -> Element<'_, Message> {
         .width(Length::Fixed(160.0))
         .height(Length::Fixed(160.0))
         .into();
-    let video_color = colors::ACCENT_PURPLE;
+    let video_color = colors::TEXT_SECONDARY;
     let video_gauge = view_metric_card("VIDEO", video_canvas, video_color);
 
-    row![mem_temp_gauge, pcie_gauge, ecc_gauge, video_gauge]
-        .spacing(spacing::LG)
-        .width(Length::Fill)
-        .into()
+    column![
+        row![mem_temp_gauge, pcie_gauge]
+            .spacing(spacing::LG)
+            .width(Length::Fill),
+        row![ecc_gauge, video_gauge]
+            .spacing(spacing::LG)
+            .width(Length::Fill),
+    ]
+    .spacing(spacing::LG)
+    .width(Length::Fill)
+    .into()
 }
 
-/// Wrap a widget in a glossy glass metric card
+/// Wrap a widget in a compact metric card.
 fn view_metric_card<'a>(
     label: &'static str,
     content: Element<'a, Message>,
@@ -649,26 +636,21 @@ fn view_metric_card<'a>(
             .spacing(spacing::MD)
             .align_x(Alignment::Center),
     )
-    .padding(spacing::XL)
+    .padding(spacing::MD)
     .width(Length::FillPortion(1))
     .style(move |_theme| container::Style {
         background: Some(colors::BG_SURFACE.into()),
         border: iced::Border {
-            color: colors::with_alpha(accent_color, 0.25),
-            width: 1.5,
-            radius: 20.0.into(),
-        },
-        shadow: iced::Shadow {
-            color: colors::with_alpha(accent_color, 0.1),
-            offset: iced::Vector::new(0.0, 8.0),
-            blur_radius: 32.0,
+            color: colors::with_alpha(accent_color, 0.45),
+            width: 1.0,
+            radius: 8.0.into(),
         },
         ..Default::default()
     })
     .into()
 }
 
-/// Quick stats display with glossy styling
+/// Compact key-value summary
 fn view_quick_stats(gpu: &GpuState) -> Element<'_, Message> {
     let temp_stat = view_stat(
         "Temperature",
@@ -680,7 +662,7 @@ fn view_quick_stats(gpu: &GpuState) -> Element<'_, Message> {
         view_stat(
             "Fan Speed",
             &format!("{}%", speed),
-            colors::rainbow(speed as f32 / 100.0),
+            colors::fan_color(speed),
         )
     } else {
         view_stat("Fan Speed", "N/A", colors::TEXT_MUTED)
@@ -705,13 +687,13 @@ fn view_quick_stats(gpu: &GpuState) -> Element<'_, Message> {
     let util_stat = view_stat(
         "GPU Load",
         &format!("{}%", gpu.utilization.gpu_percent()),
-        colors::ACCENT_PURPLE,
+        colors::ACCENT_CYAN,
     );
 
     let mem_util_stat = view_stat(
         "Mem Bandwidth",
         &format!("{}%", gpu.utilization.memory_percent()),
-        colors::ACCENT_BLUE,
+        colors::TEXT_SECONDARY,
     );
 
     container(
@@ -726,19 +708,14 @@ fn view_quick_stats(gpu: &GpuState) -> Element<'_, Message> {
         .spacing(spacing::XL)
         .width(Length::Fill),
     )
-    .padding(spacing::XL)
+    .padding(spacing::MD)
     .width(Length::Fill)
     .style(|_theme| container::Style {
         background: Some(colors::BG_SURFACE.into()),
         border: iced::Border {
             color: colors::GLASS_BORDER,
-            width: 1.5,
-            radius: 20.0.into(),
-        },
-        shadow: iced::Shadow {
-            color: colors::with_alpha(colors::ACCENT_CYAN, 0.08),
-            offset: iced::Vector::new(0.0, 8.0),
-            blur_radius: 24.0,
+            width: 1.0,
+            radius: 8.0.into(),
         },
         ..Default::default()
     })

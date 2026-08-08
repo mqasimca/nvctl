@@ -8,7 +8,9 @@ use crate::state::{AppState, GpuState};
 use crate::theme::{colors, font_size, spacing};
 use crate::widgets::FanCurveEditor;
 
-use iced::widget::{button, column, container, horizontal_space, row, slider, text, Canvas};
+use iced::widget::{
+    button, column, container, horizontal_space, row, scrollable, slider, text, Canvas,
+};
 use iced::{Alignment, Element, Length, Theme};
 use nvctl::domain::{FanPolicy, FanSpeed};
 
@@ -24,12 +26,14 @@ pub fn view_fan_control<'a>(state: &'a AppState, config: &'a GuiConfig) -> Eleme
         view_no_gpu()
     };
 
-    column![header, content]
-        .spacing(spacing::LG)
-        .padding(spacing::LG)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    scrollable(
+        column![header, content]
+            .spacing(spacing::LG)
+            .padding(spacing::LG)
+            .width(Length::Fill),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 /// Fan control header
@@ -361,19 +365,28 @@ fn view_manual_controls<'a>(gpu: &'a GpuState, config: &'a GuiConfig) -> Element
 
     let sliders_column = iced::widget::Column::with_children(sliders).spacing(spacing::SM);
 
-    container(column![title, sliders_column].spacing(spacing::MD))
-        .padding(spacing::MD)
-        .width(Length::Fill)
-        .style(|_theme| container::Style {
-            background: Some(colors::BG_SURFACE.into()),
-            border: iced::Border {
-                color: colors::BG_ELEVATED,
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
+    container(
+        column![
+            title,
+            text("Live control: changes take effect immediately on the selected GPU.")
+                .size(font_size::SM)
+                .color(colors::ACCENT_ORANGE),
+            sliders_column
+        ]
+        .spacing(spacing::MD),
+    )
+    .padding(spacing::MD)
+    .width(Length::Fill)
+    .style(|_theme| container::Style {
+        background: Some(colors::BG_SURFACE.into()),
+        border: iced::Border {
+            color: colors::BG_ELEVATED,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 /// Fan curve editor section

@@ -215,11 +215,11 @@ fn util_gradient(ratio: f32) -> Color {
     if ratio < 0.5 {
         // Blue to purple
         let t = ratio * 2.0;
-        colors::lerp(colors::ACCENT_BLUE, colors::ACCENT_PURPLE, t)
+        colors::lerp(colors::ACCENT_CYAN, colors::ACCENT_GREEN, t)
     } else {
         // Purple to magenta
         let t = (ratio - 0.5) * 2.0;
-        colors::lerp(colors::ACCENT_PURPLE, colors::ACCENT_MAGENTA, t)
+        colors::lerp(colors::ACCENT_GREEN, colors::ACCENT_ORANGE, t)
     }
 }
 

@@ -37,6 +37,17 @@ pub struct AppState {
     /// Current notification/error message
     pub notification: Option<Notification>,
 
+    /// Recent notifications, retained so consequential feedback is not lost
+    /// when a later telemetry or control message arrives.
+    pub notification_history: VecDeque<Notification>,
+
+    /// A hardware-changing action awaiting explicit user confirmation.
+    pub pending_confirmation: Option<Confirmation>,
+
+    /// Internal one-shot marker preventing a confirmed action from reopening
+    /// its confirmation dialog while it is dispatched.
+    pub confirmed_action: Option<PendingAction>,
+
     /// Fan curves being edited (one per fan on current GPU)
     pub editing_curves: Vec<Option<FanCurve>>,
 
@@ -71,6 +82,22 @@ pub struct AppState {
     pub edit_profile_name: String,
 }
 
+/// A user-visible description of a destructive or multi-device action.
+#[derive(Debug, Clone)]
+pub struct Confirmation {
+    pub action: PendingAction,
+    pub title: String,
+    pub description: String,
+}
+
+/// Actions that must be confirmed before they are performed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingAction {
+    PowerLimit,
+    FanCurve,
+    Profile(String),
+}
+
 #[derive(Debug, Clone, Default)]
 struct GpuEditorState {
     editing_curves: Vec<Option<FanCurve>>,
@@ -88,6 +115,9 @@ impl Default for AppState {
             selected_gpu: 0,
             linked_gpus: false,
             notification: None,
+            notification_history: VecDeque::new(),
+            pending_confirmation: None,
+            confirmed_action: None,
             editing_curves: Vec::new(),
             curve_control_enabled: Vec::new(),
             selected_curve_fan: 0,
@@ -148,12 +178,41 @@ impl AppState {
 
     /// Set a notification
     pub fn set_notification(&mut self, notification: Notification) {
+        const MAX_NOTIFICATION_HISTORY: usize = 12;
+        self.notification_history.push_back(notification.clone());
+        if self.notification_history.len() > MAX_NOTIFICATION_HISTORY {
+            self.notification_history.pop_front();
+        }
         self.notification = Some(notification);
     }
 
     /// Clear the current notification
     pub fn clear_notification(&mut self) {
         self.notification = None;
+    }
+
+    /// Describe an action before the user commits it to hardware.
+    pub fn request_confirmation(
+        &mut self,
+        action: PendingAction,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) {
+        self.pending_confirmation = Some(Confirmation {
+            action,
+            title: title.into(),
+            description: description.into(),
+        });
+    }
+
+    /// Remove and return the action the user has confirmed.
+    pub fn take_pending_confirmation(&mut self) -> Option<Confirmation> {
+        self.pending_confirmation.take()
+    }
+
+    /// Cancel the currently described action.
+    pub fn cancel_pending_confirmation(&mut self) {
+        self.pending_confirmation = None;
     }
 
     /// Get the editing curve for a specific fan, or the stored curve
@@ -920,5 +979,53 @@ mod tests {
         assert!(state.editing_curves.is_empty());
         assert!(state.curve_control_enabled.is_empty());
         assert_eq!(state.selected_curve_fan, 0);
+    }
+
+    #[test]
+    fn notifications_keep_a_bounded_activity_history() {
+        let mut state = AppState::new();
+        for index in 0..14 {
+            state.set_notification(Notification::success(format!("event {index}")));
+        }
+
+        assert_eq!(state.notification_history.len(), 12);
+        assert_eq!(
+            state
+                .notification_history
+                .front()
+                .map(|notification| notification.message.as_str()),
+            Some("event 2")
+        );
+        assert_eq!(
+            state
+                .notification
+                .as_ref()
+                .map(|notification| notification.message.as_str()),
+            Some("event 13")
+        );
+    }
+
+    #[test]
+    fn pending_confirmation_can_be_confirmed_or_cancelled() {
+        let mut state = AppState::new();
+        state.request_confirmation(
+            PendingAction::PowerLimit,
+            "Apply power limit",
+            "Apply to linked GPUs",
+        );
+        assert_eq!(
+            state
+                .take_pending_confirmation()
+                .map(|confirmation| confirmation.action),
+            Some(PendingAction::PowerLimit)
+        );
+
+        state.request_confirmation(
+            PendingAction::FanCurve,
+            "Apply curve",
+            "Apply to linked GPUs",
+        );
+        state.cancel_pending_confirmation();
+        assert!(state.pending_confirmation.is_none());
     }
 }

@@ -114,7 +114,7 @@ impl canvas::Program<Message> for VideoGauge {
         if self.encoder.is_some() {
             let encoder_ratio = (self.encoder_percent() as f32 / 100.0).clamp(0.0, 1.0);
             let encoder_angle = start_angle + sweep * encoder_ratio;
-            let encoder_color = colors::ACCENT_PURPLE;
+            let encoder_color = colors::ACCENT_CYAN;
 
             // Encoder glow
             draw_arc(
@@ -188,7 +188,7 @@ impl canvas::Program<Message> for VideoGauge {
             frame.fill_text(Text {
                 content: enc_text,
                 position: Point::new(center.x, center.y - 8.0),
-                color: colors::ACCENT_PURPLE,
+                color: colors::ACCENT_CYAN,
                 size: 16.0.into(),
                 horizontal_alignment: Horizontal::Center,
                 vertical_alignment: Vertical::Bottom,

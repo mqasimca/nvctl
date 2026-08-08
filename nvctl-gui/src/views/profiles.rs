@@ -46,7 +46,19 @@ fn view_header(state: &AppState) -> Element<'_, Message> {
         .size(font_size::BASE)
         .color(colors::TEXT_MUTED);
 
-    row![title, horizontal_space(), count_text]
+    let scope_text: Element<'_, Message> = if state.linked_gpus && state.has_multiple_gpus() {
+        text(format!("Linked: applies to all {} GPUs", state.gpus.len()))
+            .size(font_size::SM)
+            .color(colors::ACCENT_ORANGE)
+            .into()
+    } else {
+        text("Applies to selected GPU")
+            .size(font_size::SM)
+            .color(colors::TEXT_MUTED)
+            .into()
+    };
+
+    row![title, horizontal_space(), scope_text, count_text]
         .align_y(Alignment::Center)
         .width(Length::Fill)
         .into()
@@ -79,14 +91,18 @@ fn view_profile_list(state: &AppState) -> Element<'_, Message> {
 
     let profile_column = iced::widget::Column::with_children(profiles).spacing(spacing::SM);
 
+    let is_empty = state.profiles.is_empty();
     let scrollable_list = scrollable(profile_column)
-        .height(Length::Fill)
+        .height(if is_empty {
+            Length::Shrink
+        } else {
+            Length::Fill
+        })
         .width(Length::Fill);
 
-    container(column![title, scrollable_list].spacing(spacing::MD))
+    let list = container(column![title, scrollable_list].spacing(spacing::MD))
         .padding(spacing::MD)
         .width(Length::Fill)
-        .height(Length::Fill)
         .style(|_theme| container::Style {
             background: Some(colors::BG_SURFACE.into()),
             border: iced::Border {
@@ -95,8 +111,13 @@ fn view_profile_list(state: &AppState) -> Element<'_, Message> {
                 radius: 8.0.into(),
             },
             ..Default::default()
-        })
-        .into()
+        });
+
+    if is_empty {
+        list.into()
+    } else {
+        list.height(Length::Fill).into()
+    }
 }
 
 /// Single profile card
@@ -365,7 +386,8 @@ fn view_edit_dialog(state: &AppState) -> Element<'_, Message> {
 
     let dialog = container(dialog_content)
         .padding(spacing::LG)
-        .width(Length::Fixed(400.0))
+        .width(Length::Fill)
+        .max_width(400.0)
         .style(|_theme| container::Style {
             background: Some(colors::BG_SURFACE.into()),
             border: iced::Border {
@@ -426,7 +448,8 @@ fn view_delete_confirmation(profile_name: &str) -> Element<'_, Message> {
 
     let dialog = container(dialog_content)
         .padding(spacing::LG)
-        .width(Length::Fixed(400.0))
+        .width(Length::Fill)
+        .max_width(400.0)
         .style(|_theme| container::Style {
             background: Some(colors::BG_SURFACE.into()),
             border: iced::Border {

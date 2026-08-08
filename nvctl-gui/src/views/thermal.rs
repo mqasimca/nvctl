@@ -7,7 +7,7 @@ use crate::state::{AppState, GpuState};
 use crate::theme::{colors, font_size, spacing};
 use crate::widgets::TempGauge;
 
-use iced::widget::{column, container, horizontal_space, row, text, Canvas};
+use iced::widget::{column, container, horizontal_space, row, scrollable, text, Canvas};
 use iced::{Alignment, Element, Length};
 
 /// Render the thermal control view
@@ -22,12 +22,14 @@ pub fn view_thermal_control(state: &AppState) -> Element<'_, Message> {
         view_no_gpu()
     };
 
-    column![header, content]
-        .spacing(spacing::LG)
-        .padding(spacing::LG)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    scrollable(
+        column![header, content]
+            .spacing(spacing::LG)
+            .padding(spacing::LG)
+            .width(Length::Fill),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 /// Thermal control header
