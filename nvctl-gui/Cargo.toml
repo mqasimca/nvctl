@@ -1,6 +1,6 @@
 [package]
 name = "nvctl-gui"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "GPU control GUI for nvctl using Iced"
 license = "MIT"
